@@ -10,8 +10,9 @@ Vulnhalla automates the complete security analysis pipeline:
 1. **Fetching repositories** of a given programming language from GitHub
 2. **Downloading** their corresponding [CodeQL](https://github.com/github/codeql) databases (if available)
 3. **Running CodeQL queries** on those databases to detect security or code-quality issues
-4. **Post-processing** the results with an LLM (ChatGPT, Claude, etc.) to classify and filter issues
+4. **Post-processing** the results with an LLM (ChatGPT, Gemini, etc.) to classify and filter issues
 
+---
 
 ## 🚀 Quick Start
 
