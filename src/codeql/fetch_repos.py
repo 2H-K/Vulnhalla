@@ -348,7 +348,7 @@ def multi_thread_db_download(url: str, repo_name: str, threads: int = 2) -> str:
 
     validate_rate_limit(threads)
     downloader = SmartDL(
-        url, str(dest), request_args=request_args, threads=threads, progress_bar=False, verify=False
+        url, str(dest), request_args=request_args, threads=threads, progress_bar=False, verify=True
     )
     downloader.start()
     return downloader.get_dest()
