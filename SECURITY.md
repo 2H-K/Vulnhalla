@@ -1,5 +1,47 @@
-# Security Policies and Procedures
+确实，你踩到了 CodeQL 实战中最痛苦的几个坑：**依赖解析慢、磁盘占用巨大、以及 Pack 机制带来的繁琐流程**。
 
-CyberArk takes product security very seriously. If you believe you have found a vulnerability in one of our products, we ask that you follow responsible disclosure guidelines and contact product_security@cyberark.com and work with us toward a quick resolution to protect our customers.
+如果你的目标是利用 Vulnhalla 的思路做漏洞挖掘，而不是为了“完美复刻”它的工程代码，你完全可以**绕过它的 Pack 机制**，采用一种“轻量化”的替代方案。
 
-Refer to [CyberArk's Security Vulnerability Policy](https://www.cyberark.com/cyberark-security-vulinerability-policy.pdf) for more details.
+以下是针对你提到的痛点提炼出的**平替方案与精髓简化**：
+
+### 1. 摆脱 Pack 依赖：使用本地查询模式
+
+你不需要 `codeql pack install`。Vulnhalla 强制使用 Pack 是为了工程化分发，但个人研究完全可以跳过：
+
+* **直接运行 `.ql` 文件：** 只要你本地有 `codeql-stdlib`（从 GitHub 下载一次即可），你可以在运行命令时直接指向 `.ql` 文件的路径，而不是指向 Pack。
+* **本地库引用：** 在你的 `qlpack.yml` 中使用本地路径引用标准库，避免每次都去 GitHub 拉取。
+
+### 2. 精髓提炼：Vulnhalla 的核心 QL 逻辑
+
+Vulnhalla 的 CodeQL 脚本其实并不神秘，它的核心逻辑通常只有两步：
+
+1. **定义 Source（源）：** 比如用户态传入的参数、不受信的宏、读取的文件内容。
+2. **定义 Sink（汇）：** 比如 `memcpy` 的长度参数、数组下标、内存分配函数。
+3. **Data Flow（数据流）：** 只要 Source 能流向 Sink，就标记为一个 Alert。
+
+**你的简化操作：**
+你甚至不需要写复杂的自定义脚本。直接利用 CodeQL 官方自带的查询（比如 `CWE-119` 或 `CWE-120` 相关查询），先跑出结果。Vulnhalla 的精髓不在于它找到了别人找不到的 Data Flow，而在于它**用 LLM 过滤了这些 Flow**。
+
+### 3. 架构精简：从“一体化”转为“解耦流水线”
+
+如果你想扩展多语言且不想被 Pack 折磨，建议将流程拆解如下：
+
+| 步骤 | 传统 Vulnhalla 做法 | **推荐的轻量化做法** |
+| --- | --- | --- |
+| **查询执行** | 编写自定义 Pack，执行 `codeql database analyze` | 使用 VS Code 的 CodeQL 插件或命令行执行**本地单个 QL 文件** |
+| **结果输出** | 存储在复杂的数据库和 JSON 中 | 直接输出为 **CSV 格式** (`--format=csv`) |
+| **上下文抓取** | 依靠 Vulnhalla 的 Python 框架去解析源码 | 编写一个简单的 Python 脚本，读取 CSV 里的文件名和行号，用 `open().readlines()` 抓取代码块 |
+| **AI 判别** | 调用 Vulnhalla 内部集成的接口 | 将代码块 + **Vulnhalla 的引导式 Prompt** 手动或通过简单脚本发给 GPT-4/Claude |
+
+### 4. 为什么这么做更有效？
+
+* **跨语言：** 你只需要换一套 QL 查询语句（比如 Java 的反序列化查询），剩下的 Python 脚本（代码抓取和 LLM 判别）完全通用。
+* **低开销：** 不再需要频繁打包，改一下 QL 直接运行。
+* **网络隔离：** 只要你本地有一份 CodeQL 标准库，全程不需要联网拉取任何 `codeql/cpp-all` 之类的依赖。
+
+### 5. 核心干货：你可以直接搬走的 Prompt 策略
+
+Vulnhalla 真正值钱的是它在 `prompts/` 目录下的逻辑。即使你不用它的代码，也可以学习它如何提问：
+
+> “不要问：这段代码有溢出吗？”
+> “要问：1. 变量 `n` 的来源是否可控？ 2. 在执行到第 X 行前，是否有对 `n` 进行过 `if (n > LIMIT)` 的判断？ 3. 如果没有，请指出路径。”
