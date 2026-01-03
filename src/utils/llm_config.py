@@ -24,6 +24,11 @@ ALLOWED_LLM_PROVIDERS = {
     "vertex_ai", "gemini", "ollama", "deepseek", "zai"
 }
 
+# Cache configuration
+CACHE_ENABLED = os.getenv("LLM_CACHE_ENABLED", "true").lower() in ["true", "1", "yes"]
+CACHE_DIR = os.getenv("LLM_CACHE_DIR", "output/cache")
+CACHE_TTL_DAYS = int(os.getenv("LLM_CACHE_TTL_DAYS", "30"))
+
 
 def get_model_name(provider: Optional[str], model: Optional[str]) -> str:
     """
@@ -167,6 +172,11 @@ def load_llm_config() -> Dict[str, Any]:
     temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     top_p = float(os.getenv("LLM_TOP_P", "0.2"))
     
+    # Cache parameters
+    cache_enabled = CACHE_ENABLED
+    cache_dir = CACHE_DIR
+    cache_ttl_days = CACHE_TTL_DAYS
+    
     config = {
         "provider": provider,
         "model": get_model_name(provider, model),
@@ -180,6 +190,11 @@ def load_llm_config() -> Dict[str, Any]:
         config["endpoint"] = endpoint
     if api_version:
         config["api_version"] = api_version
+    
+    # Add cache configuration
+    config["cache_enabled"] = cache_enabled
+    config["cache_dir"] = cache_dir
+    config["cache_ttl_days"] = cache_ttl_days
     
     # Special handling for Bedrock (store AWS region and secret)
     if provider == "bedrock":

@@ -69,3 +69,4 @@ dmypy.json
 cache/
 .codeql/
 *.qlx
+codeql-pack.lock.yml
