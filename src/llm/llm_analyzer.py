@@ -4,7 +4,7 @@ Orchestrates a conversation with a language model, requesting additional snippet
 of code via "tools" if needed. Uses either OpenAI or AzureOpenAI (or placeholder
 code for a HuggingFace endpoint) to handle queries.
 
-All logic is now wrapped in the `LLMAnalyzer` class for improved organization.
+All logic is now wrapped in `LLMAnalyzer` class for improved organization.
 """
 
 import os
@@ -13,13 +13,14 @@ import re
 import json
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-# Import the relevant LLM clients here
+# Import relevant LLM clients here
 import litellm
 from src.utils.llm_config import load_llm_config, get_model_name
 from src.utils.config_validator import validate_llm_config_dict
 from src.utils.logger import get_logger
 from src.utils.common_functions import read_file_lines_from_zip
 from src.utils.exceptions import CodeQLError, LLMApiError, LLMConfigError
+from src.utils.cache_manager import CacheManager
 
 logger = get_logger(__name__)
 
@@ -31,12 +32,29 @@ class LLMAnalyzer:
     with system instructions, and ultimately produce a status code.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cache_enabled: Optional[bool] = None, cache_dir: Optional[str] = None) -> None:
         """
-        Initialize the LLMAnalyzer instance and define tools and system messages.
+        Initialize a LLMAnalyzer instance and define tools and system messages.
+        
+        Args:
+            cache_enabled: Whether to enable caching. If None, reads from config.
+            cache_dir: Custom cache directory. If None, uses default.
         """
         self.config: Optional[Dict[str, Any]] = None
         self.model: Optional[str] = None
+        
+        # Initialize cache manager
+        if cache_enabled is None:
+            # Load from config if not specified
+            from src.utils.llm_config import load_llm_config
+            temp_config = load_llm_config()
+            cache_enabled = temp_config.get("cache_enabled", True)
+            cache_dir = temp_config.get("cache_dir", "output/cache")
+        
+        self.cache_manager = CacheManager(
+            cache_dir=cache_dir or "output/cache",
+            enabled=cache_enabled
+        )
 
         # Tools configuration: A set of function calls the LLM can invoke
         self.tools: List[Dict[str, Any]] = [
@@ -65,7 +83,7 @@ class LLMAnalyzer:
                 "function": {
                     "name": "get_caller_function",
                     "description": (
-                        "Retrieves the caller function of the function with the issue. "
+                        "Retrieves the caller function of the function with issue. "
                         "Call it repeatedly to climb further up the call chain."
                     ),
                     "parameters": {
@@ -79,7 +97,7 @@ class LLMAnalyzer:
                 "function": {
                     "name": "get_class",
                     "description": (
-                        "Retrieves class / struct / union implementation (anywhere in code). "
+                        "Retrieves the class / struct / union implementation (anywhere in code). "
                         "If you need a specific method from that class, use get_function_code instead."
                     ),
                     "parameters": {
@@ -99,7 +117,7 @@ class LLMAnalyzer:
                 "function": {
                     "name": "get_global_var",
                     "description": (
-                        "Retrieves global variable definition (anywhere in code). "
+                        "Retrieves the global variable definition (anywhere in code). "
                         "If it's a variable inside a class, request the class instead."
                     ),
                     "parameters": {
@@ -108,7 +126,7 @@ class LLMAnalyzer:
                             "global_var_name": {
                                 "type": "string",
                                 "description": (
-                                    "The name of the global variable to retrieve or the name "
+                                    "The name of the global variable to retrieve or name "
                                     "of a variable inside a Namespace."
                                 )
                             }
@@ -166,9 +184,9 @@ class LLMAnalyzer:
                     "### Status Codes\n"
                     "- **1337**: Indicates a security vulnerability. If legitimate, specify the parameters that "
                     "could exploit the issue in minimal words.\n"
-                    "- **1007**: Indicates the code is secure. If it's not a real issue, specify what aspect of "
+                    "- **1007**: Indicates that the code is secure. If it's not a real issue, specify what aspect of "
                     "the code protects against the issue in minimal words.\n"
-                    "- **7331**: Indicates more code is needed to validate security. Write what data you need "
+                    "- **7331**: Indicates that more code is needed to validate security. Write what data you need "
                     "and explain why you can't use the tools to retrieve the missing data, plus add **3713** "
                     "if you're pretty sure it's not a security problem.\n"
                     "Only one status should be returned!\n"
@@ -180,7 +198,7 @@ class LLMAnalyzer:
     def init_llm_client(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
         Initialize the LLM configuration for LiteLLM.
-
+        
         Args:
             config (Dict, optional): Full configuration dictionary. If not provided, loads from .env file.
         
@@ -207,7 +225,7 @@ class LLMAnalyzer:
             # Model is already formatted by load_llm_config() via get_model_name()
             self.model = config.get("model", "gpt-4o")
             self.setup_litellm_env()
-            
+
         except ValueError as e:
             # Configuration validation errors should be LLMConfigError
             raise LLMConfigError(f"Invalid LLM configuration: {e}") from e
@@ -296,12 +314,12 @@ class LLMAnalyzer:
         """
         Retrieve the function dictionary from a CSV (FunctionTree.csv) that matches
         the specified file and line coverage.
-
+        
         Args:
             function_tree_file (str): Path to the FunctionTree.csv file.
             file (str): Name of the file as it appears in the CSV row.
             line (int): A line number within the function's start_line and end_line range.
-
+        
         Returns:
             Optional[Dict[str, str]]: The matching function row as a dict, or None if not found.
         
@@ -317,19 +335,29 @@ class LLMAnalyzer:
                         break
                     if file in function:
                         row = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', function)
-                        row_dict = dict(zip(keys, row))
+                        if len(row) != len(keys):
+                            continue  # Skip malformed rows
+
+                        function = dict(zip(keys, row))
                         if row_dict and row_dict["start_line"] and row_dict["end_line"]:
                             start = int(row_dict["start_line"])
                             end = int(row_dict["end_line"])
                             if start <= line <= end:
-                                return row_dict
+                                if file in function["file"]:
+                                    # Greedy selection: track the function with smallest range
+                                    # (most specific/nested function containing the line)
+                                    size = end - start
+                                    if size < self.smallest_range:
+                                        self.smallest_range = size
+                                        self.best_function = function
         except FileNotFoundError as e:
             raise CodeQLError(f"Function tree file not found: {function_tree_file}") from e
         except PermissionError as e:
             raise CodeQLError(f"Permission denied reading function tree file: {function_tree_file}") from e
         except OSError as e:
             raise CodeQLError(f"OS error while reading function tree file: {function_tree_file}") from e
-        return None
+
+        return self.best_function
 
     def get_function_by_name(
         self,
@@ -341,13 +369,13 @@ class LLMAnalyzer:
         """
         Retrieve a function by searching function_name in FunctionTree.csv.
         If not found, tries partial match if less_strict is True.
-
+        
         Args:
-            function_tree_file (str): Path to FunctionTree.csv.
+            function_tree_file (str): Path to the FunctionTree.csv.
             function_name (str): Desired function name (e.g., 'MyClass::MyFunc').
             all_function (List[Dict[str, Any]]): A list of known function dictionaries.
             less_strict (bool, optional): If True, use partial matching. Defaults to False.
-
+        
         Returns:
             Tuple[Union[str, Dict[str, str]], Optional[Dict[str, str]]]:
                 - The found function (dict) or an error message (str).
@@ -358,7 +386,7 @@ class LLMAnalyzer:
         """
         keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
         function_name_only = function_name.split("::")[-1]
-
+        
         for current_function in all_function:
             try:
                 with Path(function_tree_file).open("r", encoding="utf-8") as f:
@@ -402,12 +430,12 @@ class LLMAnalyzer:
         """
         Return macro info from Macros.csv for the given macro_name.
         If not found, tries partial match if less_strict is True.
-
+        
         Args:
             curr_db (str): Path to the current CodeQL database folder.
             macro_name (str): Macro name to search for.
             less_strict (bool, optional): If True, use partial matching.
-
+        
         Returns:
             Union[str, Dict[str, str]]:
                 - A dict with 'macro_name' and 'body' if found,
@@ -418,7 +446,7 @@ class LLMAnalyzer:
         """
         macro_file = Path(curr_db) / "Macros.csv"
         keys = ["macro_name", "body"]
-
+        
         try:
             with macro_file.open("r", encoding='utf-8') as f:
                 while True:
@@ -459,12 +487,12 @@ class LLMAnalyzer:
         """
         Return a global variable from GlobalVars.csv matching global_var_name.
         If not found, tries partial match if less_strict is True.
-
+        
         Args:
-            curr_db (str): Path to current CodeQL database folder.
+            curr_db (str): Path to the current CodeQL database folder.
             global_var_name (str): The name of the global variable to find.
             less_strict (bool, optional): If True, use partial matching.
-
+        
         Returns:
             Union[str, Dict[str, str]]:
                 - A dict with ['global_var_name','file','start_line','end_line'] if found,
@@ -476,7 +504,7 @@ class LLMAnalyzer:
         global_var_file = Path(curr_db) / "GlobalVars.csv"
         keys = ["global_var_name", "file", "start_line", "end_line"]
         var_name_only = global_var_name.split("::")[-1]
-
+        
         try:
             with global_var_file.open("r", encoding="utf-8") as f:
                 while True:
@@ -517,12 +545,12 @@ class LLMAnalyzer:
         """
         Return class info (type, class_name, file, start_line, end_line, simple_name)
         from Classes.csv for class_name. If not found, tries partial match if less_strict is True.
-
+        
         Args:
-            curr_db (str): Path to current CodeQL database folder.
+            curr_db (str): Path to the current CodeQL database folder.
             class_name (str): The name of the class/struct/union to find.
             less_strict (bool, optional): If True, use partial matching.
-
+        
         Returns:
             Union[str, Dict[str, str]]:
                 - A dict with keys ['type','class_name','file','start_line','end_line','simple_name']
@@ -534,7 +562,7 @@ class LLMAnalyzer:
         classes_file = Path(curr_db) / "Classes.csv"
         keys = ["type", "class_name", "file", "start_line", "end_line", "simple_name"]
         class_name_only = class_name.split("::")[-1]
-
+        
         try:
             with classes_file.open("r", encoding="utf-8") as f:
                 while True:
@@ -553,7 +581,6 @@ class LLMAnalyzer:
                             actual_class == class_name_only
                             or simple_class == class_name_only
                             or (less_strict and class_name_only in actual_class)
-                            or (less_strict and class_name_only in simple_class)
                         ):
                             return row_dict
         except FileNotFoundError as e:
@@ -575,11 +602,11 @@ class LLMAnalyzer:
     ) -> Union[str, Dict[str, str]]:
         """
         Return the caller function from function_tree_file that calls current_function.
-
+        
         Args:
-            function_tree_file (str): Path to FunctionTree.csv.
+            function_tree_file (str): Path to the FunctionTree.csv.
             current_function (Dict[str, str]): The function dictionary whose caller we want.
-
+        
         Returns:
             Union[str, Dict[str, str]]:
                 - Dict describing the caller if found
@@ -590,7 +617,7 @@ class LLMAnalyzer:
         """
         keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
         caller_id = current_function["caller_id"].replace("\"", "").strip()
-
+        
         try:
             with Path(function_tree_file).open("r", encoding="utf-8") as f:
                 while True:
@@ -602,6 +629,7 @@ class LLMAnalyzer:
                         data_dict = dict(zip(keys, data))
                         if not data_dict:
                             continue
+
                         if data_dict["function_id"].replace("\"", "").strip() == caller_id:
                             return data_dict
         except FileNotFoundError as e:
@@ -631,11 +659,11 @@ class LLMAnalyzer:
     ) -> str:
         """
         Return the snippet of code for the given current_function from the archived src.zip.
-
+        
         Args:
             db_path (str): Path to the CodeQL database directory.
             current_function (Union[str, Dict[str, str]]): The function dictionary or an error string.
-
+        
         Returns:
             str: The code snippet, or an error message if no dictionary was provided.
         
@@ -666,13 +694,13 @@ class LLMAnalyzer:
         callee: str
     ) -> Dict[str, Any]:
         """
-        Query the LLM to check how caller's variables map to callee's parameters.
+        Query the LLM to check how the caller's variables map to the callee's parameters.
         For example, used for analyzing function call relationships.
-
+        
         Args:
             caller (str): The code snippet of the caller function.
             callee (str): The code snippet of the callee function.
-
+        
         Returns:
             Dict[str, Any]: The LLM response object from `self.client`.
         
@@ -719,13 +747,14 @@ class LLMAnalyzer:
         functions: List[Dict[str, str]],
         db_path: str,
         temperature: float = 0.2,
-        top_p: float = 0.2
+        top_p: float = 0.2,
+        use_cache: bool = True
     ) -> Tuple[List[Dict[str, Any]], str]:
         """
-        Main loop to keep querying the LLM with the MESSAGES context plus
+        Main loop to keep querying the LLM with MESSAGES context plus
         any new system instructions or tool calls, until a final answer with
         a recognized status code is reached or we exhaust a tool-call limit.
-
+        
         Args:
             prompt (str): The user prompt for the LLM to process.
             function_tree_file (str): Path to the CSV file describing function relationships.
@@ -734,7 +763,8 @@ class LLMAnalyzer:
             db_path (str): Path to the CodeQL DB folder.
             temperature (float, optional): Sampling temperature. Defaults to 0.2.
             top_p (float, optional): Nucleus sampling. Defaults to 0.2.
-
+            use_cache (bool, optional): Whether to use cache. Defaults to True.
+        
         Returns:
             Tuple[List[Dict[str, Any]], str]:
                 - The final conversation messages,
@@ -751,15 +781,27 @@ class LLMAnalyzer:
         got_answer = False
         db_path_clean = db_path.replace(" ", "")
         all_functions = functions
-
+        
         messages: List[Dict[str, Any]] = self.MESSAGES[:]
         messages.append({"role": "user", "content": prompt})
-
+        
+        # Log initial message stats for debugging
+        total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
+        logger.info(f"  💬 Initial messages: {len(messages)} messages, ~{total_chars} chars")
+        
+        # Check cache first
+        if use_cache and self.cache_manager.enabled:
+            cached_response = self.cache_manager.get(prompt, self.model)
+            if cached_response:
+                logger.info(f"✅ Cache HIT for model {self.model}")
+                # Return cached response as a single message
+                return [{"role": "assistant", "content": cached_response}], cached_response
+        
         amount_of_tools = 0
         final_content = ""
-
+        
         while not got_answer:
-            # Send the current messages + tools to the LLM endpoint
+            # Send current messages + tools to LLM endpoint
             try:
                 response = litellm.completion(
                     model=self.model,
@@ -789,6 +831,10 @@ class LLMAnalyzer:
 
             final_content = content_obj.content or ""
             tool_calls = content_obj.tool_calls
+            
+            # Log message stats after each LLM response
+            total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
+            logger.info(f"  🔄 LLM response #{amount_of_tools + 1}: {len(messages)} messages, ~{total_chars} chars")
 
             if not tool_calls:
                 # Check if we have a recognized status code
@@ -824,8 +870,8 @@ class LLMAnalyzer:
                         )
                         if isinstance(child_function, dict):
                             all_functions.append(child_function)
-                        child_code = self.extract_function_from_file(db_path_clean, child_function)
-                        response_msg = child_code
+                            child_code = self.extract_function_from_file(db_path_clean, child_function)
+                            response_msg = child_code
 
                         if isinstance(child_function, dict) and isinstance(parent_function, dict):
                             caller_code = self.extract_function_from_file(db_path_clean, parent_function)
@@ -903,4 +949,29 @@ class LLMAnalyzer:
                         )
                     })
 
+        # Cache the response if we got an answer
+        if got_answer and use_cache:
+            self.cache_manager.set(prompt, final_content, self.model)
+
         return messages, final_content
+
+    def clear_cache(self, older_than_days: int = 30) -> int:
+        """
+        Clear cache entries older than specified days.
+        
+        Args:
+            older_than_days: Delete entries older than this many days. Defaults to 30.
+        
+        Returns:
+            Number of entries deleted.
+        """
+        return self.cache_manager.clear(older_than_days)
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """
+        Get cache statistics.
+        
+        Returns:
+            Dictionary with cache statistics (total_entries, hit_rate, etc.).
+        """
+        return self.cache_manager.get_stats()
