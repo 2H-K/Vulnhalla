@@ -248,8 +248,6 @@ def validate_logging_config() -> Tuple[bool, Optional[str]]:
         - is_valid: True if logging config is valid
         - error_message: Error message if invalid, None if valid
     """
-    import logging
-    
     # Validate LOG_LEVEL
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}

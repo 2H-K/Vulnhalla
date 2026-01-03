@@ -195,7 +195,7 @@ def run_queries_on_db(
                     codeql_bin
                 )
     else:
-        logger.warning("Tools folder '%s' not found. Skipping individual queries.", tools_folder)
+        logger.warning(f"Tools folder '{tools_folder}' not found. Skipping individual queries.")
 
     # 2) Run the entire queries folder in one go (bulk analysis)
     queries_folder_path = Path(queries_folder)
@@ -229,7 +229,7 @@ def run_queries_on_db(
                 f"CodeQL returned exit code {e.returncode}"
             ) from e
     else:
-        logger.warning("Queries folder '%s' not found. Skipping bulk analysis.", queries_folder)
+        logger.warning(f"Queries folder '{queries_folder}' not found. Skipping bulk analysis.")
 
 
 def compile_and_run_codeql_queries(
@@ -266,39 +266,39 @@ def compile_and_run_codeql_queries(
     compile_all_queries(queries_folder, threads, codeql_bin)
 
     # Step 2: List databases and run queries
-    logger.info("Running queries on each DB in %s", dbs_folder)
+    logger.info(f"Running queries on each DB in {dbs_folder}")
     
     # List what's in the folder for debugging
     try:
         dbs_folder_path = Path(dbs_folder)
         contents = list(dbs_folder_path.iterdir())
         if len(contents) == 0:
-            logger.warning("Database folder '%s' is empty. No databases to process.", dbs_folder)
+            logger.warning(f"Database folder '{dbs_folder}' is empty. No databases to process.")
             return
-        logger.debug("Found %d item(s) in database folder: %s", len(contents), [str(c) for c in contents])
+        logger.debug(f"Found {len(contents)} item(s) in database folder: {[str(c) for c in contents]}")
     except OSError as e:
-        logger.warning("Cannot access database folder '%s': %s. No databases to process.", dbs_folder, e)
+        logger.warning(f"Cannot access database folder '{dbs_folder}': {e}. No databases to process.")
         return
     
     dbs_path = get_all_dbs(dbs_folder)
     
     if len(dbs_path) == 0:
-        logger.warning("No valid databases found in '%s'. Expected structure: <dbs_folder>/<repo_name>/<db_name>/codeql-database.yml", dbs_folder)
+        logger.warning(f"No valid databases found in '{dbs_folder}'. Expected structure: <dbs_folder>/<repo_name>/<db_name>/codeql-database.yml")
         logger.warning("Make sure databases were downloaded and extracted successfully.")
         return
     
     for curr_db in dbs_path:
-        logger.info("Processing DB: %s", curr_db)
+        logger.info(f"Processing DB: {curr_db}")
         
         # Check if database folder is empty
         curr_db_path = Path(curr_db)
         if curr_db_path.is_dir():
             try:
                 if len(list(curr_db_path.iterdir())) == 0:
-                    logger.warning("Database folder '%s' is empty. Skipping queries.", curr_db)
+                    logger.warning(f"Database folder '{curr_db}' is empty. Skipping queries.")
                     continue
             except OSError:
-                logger.warning("Cannot access database folder '%s'. Skipping.", curr_db)
+                logger.warning(f"Cannot access database folder '{curr_db}'. Skipping.")
                 continue
         
         # If issues.csv was not generated yet, or FunctionTree.csv missing, run

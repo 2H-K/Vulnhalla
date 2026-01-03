@@ -45,7 +45,7 @@ def _log_exception_cause(e: Exception) -> None:
         cause_str = str(cause)
         error_str = str(e)
         if cause_str not in error_str:
-            logger.error("   Cause: %s", cause)
+            logger.error(f"   Cause: {cause}")
 
 
 def analyze_pipeline(repo: Optional[str] = None, lang: str = "c", threads: int = 16, open_ui: bool = True) -> None:
@@ -87,18 +87,18 @@ See README.md for configuration reference.
         logger.info("\n[1/4] Fetching CodeQL Databases")
         logger.info("-" * 60)
         if repo:
-            logger.info("Fetching database for: %s", repo)
+            logger.info(f"Fetching database for: {repo}")
             fetch_codeql_dbs(lang=lang, threads=threads, single_repo=repo)
         else:
-            logger.info("Fetching top repositories for language: %s", lang)
+            logger.info(f"Fetching top repositories for language: {lang}")
             fetch_codeql_dbs(lang=lang, max_repos=100, threads=4)
     except CodeQLConfigError as e:
-        logger.error("❌ Configuration error while fetching CodeQL databases: %s", e)
+        logger.error(f"❌ Configuration error while fetching CodeQL databases: {e}")
         _log_exception_cause(e)
         logger.error("   Please check your GitHub token and permissions.")
         sys.exit(1)
     except CodeQLError as e:
-        logger.error("❌ Failed to fetch CodeQL databases: %s", e)
+        logger.error(f"❌ Failed to fetch CodeQL databases: {e}")
         _log_exception_cause(e)
         logger.error("   Please check file permissions, disk space, and GitHub API access.")
         sys.exit(1)
@@ -114,17 +114,17 @@ See README.md for configuration reference.
             timeout=300
         )
     except CodeQLConfigError as e:
-        logger.error("❌ Configuration error while running CodeQL queries: %s", e)
+        logger.error(f"❌ Configuration error while running CodeQL queries: {e}")
         _log_exception_cause(e)
         logger.error("   Please check your CODEQL_PATH configuration.")
         sys.exit(1)
     except CodeQLExecutionError as e:
-        logger.error("❌ Failed to execute CodeQL queries: %s", e)
+        logger.error(f"❌ Failed to execute CodeQL queries: {e}")
         _log_exception_cause(e)
         logger.error("   Please check your CodeQL installation and database files.")
         sys.exit(1)
     except CodeQLError as e:
-        logger.error("❌ CodeQL error: %s", e)
+        logger.error(f"❌ CodeQL error: {e}")
         _log_exception_cause(e)
         sys.exit(1)
     
@@ -135,27 +135,27 @@ See README.md for configuration reference.
         analyzer = IssueAnalyzer(lang=lang)
         analyzer.run()
     except LLMConfigError as e:
-        logger.error("❌ LLM configuration error: %s", e)
+        logger.error(f"❌ LLM configuration error: {e}")
         _log_exception_cause(e)
         logger.error("   Please check your LLM configuration and API credentials in .env file.")
         sys.exit(1)
     except LLMApiError as e:
-        logger.error("❌ LLM API error: %s", e)
+        logger.error(f"❌ LLM API error: {e}")
         _log_exception_cause(e)
         logger.error("   Please check your API key, network connection, and rate limits.")
         sys.exit(1)
     except LLMError as e:
-        logger.error("❌ LLM error: %s", e)
+        logger.error(f"❌ LLM error: {e}")
         _log_exception_cause(e)
         sys.exit(1)
     except CodeQLError as e:
-        logger.error("❌ CodeQL error while reading database files: %s", e)
+        logger.error(f"❌ CodeQL error while reading database files: {e}")
         _log_exception_cause(e)
         logger.error("   This step reads CodeQL database files (YAML, ZIP, CSV) to prepare data for LLM analysis.")
         logger.error("   Please check your CodeQL databases and files are accessible.")
         sys.exit(1)
     except VulnhallaError as e:
-        logger.error("❌ File system error while saving results: %s", e)
+        logger.error(f"❌ File system error while saving results: {e}")
         _log_exception_cause(e)
         logger.error("   This step writes analysis results to disk and creates output directories.")
         logger.error("   Please check file permissions and disk space.")

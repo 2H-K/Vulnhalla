@@ -72,13 +72,13 @@ class ResultsLoader:
             with path.open('r', encoding='utf-8') as f:
                 content = f.read()
         except FileNotFoundError as e:
-            logger.error("File not found: %s", path)
+            logger.error(f"File not found: {path}")
             return None
         except PermissionError as e:
-            logger.error("Permission denied reading file: %s", path)
+            logger.error(f"Permission denied reading file: {path}")
             return None
         except OSError as e:
-            logger.error("OS error reading file: %s", path)
+            logger.error(f"OS error reading file: {path}")
             return None
     
         try:
@@ -172,16 +172,16 @@ class ResultsLoader:
             with path.open("r", encoding="utf-8") as f:
                 return json.loads(f.read().replace("\n", "\\n"))
         except FileNotFoundError as e:
-            logger.error("File not found: %s", path)
+            logger.error(f"File not found: {path}")
             return None
         except PermissionError as e:
-            logger.error("Permission denied reading file: %s", path)
+            logger.error(f"Permission denied reading file: {path}")
             return None
         except json.JSONDecodeError as e:
-            logger.error("JSON error parsing %s: %s", path, e)
+            logger.error(f"JSON error parsing {path}: {e}")
             return None
         except OSError as e:
-            logger.error("OS error reading file: %s", path)
+            logger.error(f"OS error reading file: {path}")
             return None
     
     @staticmethod

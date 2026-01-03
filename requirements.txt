@@ -5,3 +5,4 @@ PyYAML
 textual
 pySmartDL
 pytest
+loguru

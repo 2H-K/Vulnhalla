@@ -196,7 +196,7 @@ class LLMAnalyzer:
                 provider = config.get("provider", "openai")
                 model = config.get("model", "gpt-4o")
                 self.model = get_model_name(provider, model)
-                logger.info("Using model: %s", self.model)
+                logger.info(f"Using model: {self.model}")
                 self.setup_litellm_env()
                 return
             
@@ -237,6 +237,8 @@ class LLMAnalyzer:
             "huggingface": "HUGGINGFACE_API_KEY",
             "cohere": "COHERE_API_KEY",
             "gemini": "GOOGLE_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+            "zai": "ZAI_API_KEY",
         }
         
         # Handle providers with simple API key mapping

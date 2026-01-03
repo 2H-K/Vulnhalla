@@ -16,6 +16,8 @@ Analysis Pipeline Algorithm:
     5. Build prompt; save *_raw.json; run LLM analysis; save *_final.json.
     6. Classify by substring: "1337" → true, "1007" → false, else → more; log stats.
 """
+import sys,os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from pathlib import Path, PurePosixPath
 import csv
@@ -115,7 +117,7 @@ class IssueAnalyzer:
         # get_all_dbs() raises CodeQLError on errors
         dbs_path = get_all_dbs(dbs_folder)
         for curr_db in dbs_path:
-            logger.info("Processing DB: %s", curr_db)
+            logger.info(f"Processing DB: {curr_db}")
             curr_db_path = Path(curr_db)
             function_tree_csv = curr_db_path / "FunctionTree.csv"
             issues_file = curr_db_path / "issues.csv"
@@ -493,23 +495,6 @@ class IssueAnalyzer:
         """
         Processes all issues of a single type. Builds file/folder paths, runs
         analysis, calls the LLM, and saves results.
-
-        Algorithm (per issue):
-            - Normalize paths (Windows: ':'→'_', '\'→'/'; Linux: strip leading '/')
-            - Find function; extract snippet [start_offset-1:end_offset]
-            - Replace bracket refs; append extra functions if needed
-            - Build prompt; save raw/final; run LLM
-            - Classify by '1337'/'1007'/else; log stats
-
-        Args:
-            issue_type (str): The name of the issue type.
-            issues_of_type (List[Dict[str, str]]): All issues belonging to that type.
-            llm_analyzer (LLMAnalyzer): The LLM analyzer instance to use for queries.
-        
-        Raises:
-            CodeQLError: If database files cannot be read (YAML, ZIP, CSV, etc.).
-            VulnhallaError: If result files cannot be written.
-            LLMError: If LLM analysis fails.
         """
         results_folder = Path("output/results") / self.lang / issue_type.replace(" ", "_").replace("/", "-")
         self.ensure_directories_exist([str(results_folder)])
@@ -519,7 +504,7 @@ class IssueAnalyzer:
         false_issues = []
         more_data = []
 
-        logger.info("Found %d issues of type %s", len(issues_of_type), issue_type)
+        logger.info(f"Found {len(issues_of_type)} issues of type {issue_type}")
         logger.info("")
         for issue in issues_of_type:
             issue_id += 1
@@ -527,42 +512,64 @@ class IssueAnalyzer:
             db_path_obj = Path(self.db_path)
             db_yml_path = db_path_obj / "codeql-database.yml"
             db_yml = read_yml(str(db_yml_path))
-            self.code_path = db_yml["sourceLocationPrefix"]
+            
+            # 1. 原始路径信息获取
+            raw_prefix = db_yml.get("sourceLocationPrefix", "")
+            raw_issue_file = issue["file"]
+            
+            # 2. 核心兼容逻辑：生成用于 ZIP 检索和 CSV 匹配的两种路径
+            # 统一转为正斜杠并去掉前后空格/斜杠
+            p_prefix = raw_prefix.replace("\\", "/").strip("/")
+            p_file = raw_issue_file.replace("\\", "/").lstrip("/")
 
-            # Path normalization for cross-platform compatibility:
-            # Windows paths contain ":" (e.g., "C:\path\to\code") which conflicts with
-            # ZIP archive path handling. We normalize by:
-            # - Replacing ":" with "_" (e.g., "C_" instead of "C:")
-            # - Converting backslashes to forward slashes
-            # Linux paths are absolute (start with "/") which we remove for ZIP access
-            if ":" in self.code_path:
-                # Windows path: normalize drive letter and separators
-                self.code_path = self.code_path.replace(":", "_").replace("\\", "/")
+            # 拼接完整逻辑路径
+            if p_prefix and p_file.startswith(p_prefix):
+                full_logical_path = p_file
             else:
-                # Linux path: remove leading slash
-                self.code_path = self.code_path[1:]
+                full_logical_path = f"{p_prefix}/{p_file}".replace("//", "/")
 
+            # 生成两个版本的候选路径：A(带冒号 F:/) 和 B(带下划线 F_/)
+            path_version_colon = full_logical_path.replace("_/", ":/") if "_/" in full_logical_path else full_logical_path
+            if ":" in full_logical_path:
+                path_version_underscore = full_logical_path.replace(":", "_")
+            else:
+                path_version_underscore = full_logical_path
+
+            # 3. 确定数据库文件路径
             function_tree_file = str(db_path_obj / "FunctionTree.csv")
             src_zip_path = str(db_path_obj / "src.zip")
 
-            full_file_path = self.code_path + issue["file"]
-            code_file_contents = read_file_lines_from_zip(src_zip_path, full_file_path).split("\n")
+            # 4. 尝试读取 ZIP：兼容 Windows(F_/) 和 Linux/原生路径
+            code_file_contents_raw = read_file_lines_from_zip(src_zip_path, path_version_underscore)
+            if not code_file_contents_raw:
+                # 备选方案：尝试带冒号的原始路径
+                code_file_contents_raw = read_file_lines_from_zip(src_zip_path, path_version_colon)
+            
+            if not code_file_contents_raw:
+                logger.warning(f"issue {issue_id}: Cannot find file in ZIP! Tried: {path_version_underscore} and {path_version_colon}")
+                continue
+            
+            code_file_contents = code_file_contents_raw.split("\n")
 
+            # 5. 寻找函数：CSV 匹配不应带开头的 "/"
+            # 根据你提供的 CSV 结构，直接传入带盘符的路径
             current_function = self.find_function_by_line(
                 function_tree_file,
-                "/" + self.code_path + issue["file"],
+                path_version_colon, 
                 int(issue["start_line"])
             )
+            
             if not current_function:
-                logger.warning("issue %s: Can't find the function or function is too big!", issue_id)
+                logger.warning(f"issue {issue_id}: Can't find the function in CSV! Path: {path_version_colon}")
                 continue
 
+            # 6. 后续逻辑保持不变
             snippet = code_file_contents[int(issue["start_line"]) - 1][
                 int(issue["start_offset"]) - 1:int(issue["end_offset"])
             ]
 
             code = (
-                "file: " + self.code_path + issue["file"] + "\n" +
+                "file: " + path_version_colon + "\n" +
                 self.extract_function_code(code_file_contents, current_function)
             )
 
@@ -611,16 +618,16 @@ class IssueAnalyzer:
                 status = "LLM needs More Data"
 
             # Log issue status
-            logger.info("Issue ID: %s, LLM decision: → %s", issue_id, status)
+            logger.info(f"Issue ID: {issue_id}, LLM decision: → {status}")
 
         logger.info("")
-        logger.info("Issue type: %s", issue_type)
-        logger.info("Total issues: %d", len(issues_of_type))
-        logger.info("True Positive: %d", len(real_issues))
-        logger.info("False Positive: %d", len(false_issues))
-        logger.info("LLM needs More Data: %d", len(more_data))
+        logger.info(f"Issue type: {issue_type}")
+        logger.info(f"Total issues: {len(issues_of_type)}")
+        logger.info(f"True Positive: {len(real_issues)}")
+        logger.info(f"False Positive: {len(false_issues)}")
+        logger.info(f"LLM needs More Data: {len(more_data)}")
         logger.info("")
-
+    
     def run(self) -> None:
         """
         Main analysis routine:
@@ -650,7 +657,7 @@ class IssueAnalyzer:
         total_issues = 0
         for issue_type in issues_statistics:
             total_issues += len(issues_statistics[issue_type])
-        logger.info("Total issues found: %d", total_issues)
+        logger.info(f"Total issues found: {total_issues}")
         logger.info("")
 
         # Process all issues, type by type

@@ -21,7 +21,7 @@ elif Path(".env.example").exists():
 ALLOWED_LLM_PROVIDERS = {
     "openai", "azure", "anthropic", "mistral", "codestral",
     "groq", "openrouter", "huggingface", "cohere", "bedrock",
-    "vertex_ai", "gemini", "ollama"
+    "vertex_ai", "gemini", "ollama", "deepseek", "zai"
 }
 
 
@@ -155,6 +155,13 @@ def load_llm_config() -> Dict[str, Any]:
         endpoint = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         # Ollama doesn't require API key, but we set a placeholder to pass validation
         api_key = "ollama_placeholder"
+    
+    elif provider == "deepseek":
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+    
+    elif provider == "zai":
+        # ZAI (智谱AI) uses ZAI_API_KEY
+        api_key = os.getenv("ZAI_API_KEY")
     
     # Get optional parameters
     temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))

@@ -76,10 +76,9 @@ def fetch_repos_from_github_api(url: str) -> Dict[str, Any]:
 
         # Approaching the rate limit, wait until reset
         if remaining_requests and reset_time and int(remaining_requests) < 7:
-            logger.warning("Remaining requests: %s", remaining_requests)
+            logger.warning(f"Remaining requests: {remaining_requests}")
             logger.warning(
-                "Rate limit resets at: %s",
-                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(reset_time)))
+                f"Rate limit resets at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(reset_time)))}"
             )
             wait_time = int(reset_time) - int(time.time())
             if wait_time > 0:
@@ -150,10 +149,9 @@ def validate_rate_limit(threads: int) -> None:
     remaining_requests = rate_limit["resources"]["core"]["remaining"]
     reset_time = rate_limit["resources"]["core"]["reset"]
     if int(remaining_requests) < threads + 3:
-        logger.warning("Remaining requests: %s", remaining_requests)
+        logger.warning(f"Remaining requests: {remaining_requests}")
         logger.warning(
-            "Rate limit resets at: %s",
-            time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(reset_time)))
+                f"Rate limit resets at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(reset_time)))}"
         )
         wait_time = int(reset_time) - int(time.time()) + 120
         if wait_time > 0:
@@ -189,7 +187,7 @@ def custom_download(url: str, local_filename: str, max_attempts: int = 5, attemp
                     zip_ref.testzip()  # Test if ZIP is valid
             except (zipfile.BadZipFile, zipfile.LargeZipFile):
                 # File is corrupted, delete it and start again
-                logger.warning("Existing file %s is corrupted. Deleting and starting fresh.", local_filename)
+                logger.warning(f"Existing file {local_filename} is corrupted. Deleting and starting fresh.")
                 try:
                     local_file_path.unlink()
                     file_size = 0
@@ -241,7 +239,7 @@ def custom_download(url: str, local_filename: str, max_attempts: int = 5, attemp
                 raise
 
             total_size = int(response.headers.get("content-length", 0)) + file_size
-            logger.debug("File size: %d bytes (%.2f MB)", total_size, total_size / 1_000_000)
+            logger.debug(f"File size: {total_size} bytes ({total_size / 1_000_000:.2f} MB)")
 
             mode = "ab" if (file_size > 0 and not force_full_download) else "wb"
             with local_file_path.open(mode) as file:
@@ -280,8 +278,8 @@ def custom_download(url: str, local_filename: str, max_attempts: int = 5, attemp
                 print()
 
         time_taken = time.time() - start_time
-        logger.info("File downloaded successfully as %s", local_filename)
-        logger.info("Download completed in %.2f minutes.", time_taken / 60)
+        logger.info(f"File downloaded successfully as {local_filename}")
+        logger.info(f"Download completed in {time_taken / 60:.2f} minutes.")
 
     except requests.RequestException as e:
         # Network errors
@@ -290,11 +288,7 @@ def custom_download(url: str, local_filename: str, max_attempts: int = 5, attemp
 
         backoff_time = min(2 ** attempt, 60)
         logger.warning(
-            "Network error during download (attempt %d/%d): %s. Retrying in %.1f seconds...",
-            attempt,
-            max_attempts,
-            e,
-            backoff_time,
+            f"Network error during download (attempt {attempt}/{max_attempts}): {e}. Retrying in {backoff_time:.1f} seconds..."
         )
         time.sleep(backoff_time)
         return custom_download(
@@ -438,7 +432,7 @@ def filter_repos_by_db_and_lang(repos: List[Dict[str, Any]], lang: str) -> List[
             if "language" in db and db["language"] == gh_lang:
                 # Validate required fields exist
                 if "url" not in db:
-                    logger.warning("Database entry missing 'url' field for %s, skipping", repo['repo_name'])
+                    logger.warning(f"Database entry missing 'url' field for {repo['repo_name']}, skipping")
                     continue
                 repos_db.append(
                     {
@@ -504,7 +498,7 @@ def download_and_extract_db(repo: Dict[str, Any], threads: int, extract_folder: 
         CodeQLConfigError: On 4xx client errors during download (e.g., invalid token).
     """
     org_name, repo_name = repo["repo_name"].split("/")
-    logger.info("Downloading repo %s/%s", org_name, repo_name)
+    logger.info(f"Downloading repo {org_name}/{repo_name}")
     zip_path = multi_thread_db_download(repo["db_url"], repo_name, threads)
 
     db_path = Path(extract_folder) / repo_name
@@ -560,7 +554,7 @@ def download_db_by_name(repo_name: str, lang: str, threads: int) -> None:
     repo = {"stars": 0, "forks": 0, "repo_name": repo_name, "html_url": ""}
     repo_db = filter_repos_by_db_and_lang([repo], lang)
     if not repo_db:
-        logger.warning("No %s DB found for %s", lang, repo_name)
+        logger.warning(f"No {lang} DB found for {repo_name}")
         return
     download_and_extract_db(repo_db[0], threads, str(Path("output/databases") / lang))
 
@@ -616,12 +610,12 @@ def fetch_codeql_dbs(
         return
 
     # Otherwise fetch top repos for this language
-    logger.info("Fetching up to %d top %s repos with DBs on GitHub.", max_repos, lang)
+    logger.info(f"Fetching up to {max_repos} top {lang} repos with DBs on GitHub.")
     repos_db = search_top_matching_repos(max_repos, lang)
     write_file_text(backup_file, json.dumps(repos_db))
 
     for i, repo_info in enumerate(repos_db):
-        logger.info("Downloading repo %d/%d: %s", i + 1, len(repos_db), repo_info['repo_name'])
+        logger.info(f"Downloading repo {i + 1}/{len(repos_db)}: {repo_info['repo_name']}")
         download_and_extract_db(repo_info, threads, db_folder)
 
         # Update the backup file in case of error or partial completion
@@ -633,9 +627,9 @@ def fetch_codeql_dbs(
         try:
             backup_file_path.unlink()
         except PermissionError as e:
-            logger.warning("Permission denied deleting backup file %s: %s", backup_file, e)
+            logger.warning(f"Permission denied deleting backup file {backup_file}: {e}")
         except OSError as e:
-            logger.warning("OS error deleting backup file %s: %s", backup_file, e)
+            logger.warning(f"OS error deleting backup file {backup_file}: {e}")
 
 
 def main_cli() -> None:
@@ -643,7 +637,7 @@ def main_cli() -> None:
     CLI entry point. If no arguments, fetch top LANG repos.
     If an argument 'org/repo' is provided, fetch just that DB.
     """
-    logger.info("Current lang: %s", LANG)
+    logger.info(f"Current lang: {LANG}")
 
     if len(sys.argv) == 1:
         # No arguments, do the "bulk fetch"
