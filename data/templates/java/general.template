@@ -1,0 +1,6 @@
+1. Is this a real security issue that you can exploit?
+2. For Java: Check for deserialization vulnerabilities (readObject), SQL injection (Statement vs PreparedStatement), command injection (Runtime.exec), path traversal (File operations), XXE (XML parsing), SSRF (URL connections).
+3. Consider the framework context: Spring, Hibernate, Struts, etc. - framework-specific vulnerabilities?
+4. Verify if the vulnerable code path is reachable and can be triggered by an attacker.
+5. Check for proper input validation, sanitization, and output encoding.
+6. Consider reflection usage, dynamic class loading, and JNI calls for potential bypasses.

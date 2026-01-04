@@ -19,6 +19,8 @@ ENV/
 
 # Data directories (runtime-generated)
 output/*
+data/queries/**/*.qlx
+data/queries/**/codeql-pack.lock.yml
 
 # IDE / OS files
 .vscode/

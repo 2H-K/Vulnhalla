@@ -65,13 +65,20 @@ def setup_logging(
         
     else:
         # 默认模式：INFO 级别简洁，WARNING 以上带前缀
-        # 修复了重复打印的 Bug：INFO 通道现在只处理 INFO 级别
-        logger.add(sys.stdout, format="<level>{message}</level>", 
-                   filter=lambda r: r["level"].name == "INFO" and main_filter(r), colorize=True)
-        # WARNING 及以上级别显示 [WARNING] 等前缀
-        logger.add(sys.stdout, format="<level>{level: <8}</level> | <level>{message}</level>", 
-                   level="WARNING", filter=main_filter, colorize=True)
-    
+        logger.add(
+            sys.stdout,
+            format="<level>{message}</level>",
+            level="INFO",
+            filter=main_filter,
+            colorize=True
+        )
+        logger.add(
+            sys.stdout,
+            format="<level>{level: <8}</level> | <level>{message}</level>",
+            level="WARNING",
+            filter=main_filter,
+            colorize=True
+        )   
     # 2. File Handler 配置
     if log_file_path:
         try:

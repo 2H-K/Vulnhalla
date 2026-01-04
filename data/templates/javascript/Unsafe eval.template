@@ -1,0 +1,5 @@
+1. Is this a real security vulnerability?
+2. Check if eval() or similar function is called with user-controlled input (request parameters, form data, cookies)
+3. Verify if input validation or sanitization is applied before eval()
+4. Consider the context: Is this in client-side code (browser) or server-side code (Node.js)?
+5. Evaluate impact: Can an attacker execute arbitrary JavaScript code?

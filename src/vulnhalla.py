@@ -19,6 +19,8 @@ Analysis Pipeline Algorithm:
 import sys,os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+import os
+
 from pathlib import Path, PurePosixPath
 import csv
 import re
@@ -49,18 +51,20 @@ class IssueAnalyzer:
     and forwards them to an LLM (via llm_analyzer) for triage.
     """
 
-    def __init__(self, lang: str = "c", config: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, lang: str = "c", config: Optional[Dict[str, Any]] = None, db_dir: Optional[str] = None) -> None:
         """
         Initialize the IssueAnalyzer with default parameters.
 
         Args:
             lang (str, optional): The language code. Defaults to 'c'.
             config (Dict, optional): Full LLM configuration dictionary. If not provided, loads from .env file.
+            db_dir (str, optional): Specific database directory to analyze. If None, analyzes all in the language folder.
         """
         self.lang = lang
         self.db_path: Optional[str] = None
         self.code_path: Optional[str] = None
         self.config = config
+        self.db_dir = db_dir
 
     # ----------------------------------------------------------------------
     # 1. CSV Parsing and Data Gathering
@@ -651,8 +655,43 @@ class IssueAnalyzer:
 
         dbs_folder = str(Path("output/databases") / self.lang)
 
-        # Gather issues from all DBs
-        issues_statistics = self.collect_issues_from_databases(dbs_folder)
+        # Gather issues from DBs
+        if self.db_dir:
+            # Only analyze databases within the specific directory
+            specific_folder = Path(dbs_folder) / self.db_dir
+            if specific_folder.exists():
+                # Recursively find directories containing codeql-database.yml
+                dbs_path = []
+                for root, dirs, files in os.walk(str(specific_folder)):
+                    if 'codeql-database.yml' in files:
+                        dbs_path.append(root)
+                        # Assuming one database per specified directory
+                        break
+            else:
+                logger.error(f"Specified database directory not found: {specific_folder}")
+                return
+        else:
+            # Gather issues from all DBs
+            dbs_path = get_all_dbs(dbs_folder)
+
+        issues_statistics = {}
+        for curr_db in dbs_path:
+            logger.info(f"Processing DB: {curr_db}")
+            curr_db_path = Path(curr_db)
+            function_tree_csv = curr_db_path / "FunctionTree.csv"
+            issues_file = curr_db_path / "issues.csv"
+
+            if function_tree_csv.exists() and issues_file.exists():
+                # parse_issues_csv() raises CodeQLError on errors
+                issues = self.parse_issues_csv(str(issues_file))
+                for issue in issues:
+                    if issue["name"] not in issues_statistics:
+                        issues_statistics[issue["name"]] = []
+                    issue["db_path"] = curr_db
+                    issues_statistics[issue["name"]].append(issue)
+            else:
+                logger.error("Error: Execute run_codeql_queries.py first!")
+                continue
 
         total_issues = 0
         for issue_type in issues_statistics:

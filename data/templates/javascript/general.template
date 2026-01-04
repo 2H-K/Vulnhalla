@@ -1,0 +1,4 @@
+1. Is this a real security issue that you can exploit?
+2. For JavaScript/Node.js: Check if this affects user input handling, eval(), child_process, or sensitive data exposure.
+3. Consider the context: Is this in client-side code, server-side code, or shared libraries?
+4. Verify if the vulnerable code path is actually reachable and can be triggered by an attacker.
