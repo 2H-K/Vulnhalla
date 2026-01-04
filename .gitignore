@@ -18,9 +18,7 @@ ENV/
 .env.*.local
 
 # Data directories (runtime-generated)
-output/databases/
-output/results/
-output/zip_dbs/
+output/*
 data/queries/**/*.qlx
 data/queries/**/codeql-pack.lock.yml
 
