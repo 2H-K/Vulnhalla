@@ -326,7 +326,15 @@ class LLMAnalyzer:
         Raises:
             CodeQLError: If function tree file cannot be read (not found, permission denied, etc.).
         """
+        # DEBUG: Log entry parameters
+        logger.debug(f"get_function_by_line called with file={file}, line={line}")
+        
         keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
+        
+        # Initialize tracking variables for greedy selection
+        self.smallest_range = float('inf')
+        self.best_function = None
+        
         try:
             with Path(function_tree_file).open("r", encoding="utf-8") as f:
                 while True:
@@ -336,20 +344,28 @@ class LLMAnalyzer:
                     if file in function:
                         row = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', function)
                         if len(row) != len(keys):
+                            logger.debug(f"Skipping malformed row: {len(row)} columns vs {len(keys)} expected")
                             continue  # Skip malformed rows
 
-                        function = dict(zip(keys, row))
+                        # FIXED: Use row_dict instead of function to avoid confusion
+                        row_dict = dict(zip(keys, row))
+                        logger.debug(f"Parsed row_dict: {row_dict}")
+                        
                         if row_dict and row_dict["start_line"] and row_dict["end_line"]:
                             start = int(row_dict["start_line"])
                             end = int(row_dict["end_line"])
+                            logger.debug(f"Checking line range: start={start}, end={end}, target_line={line}")
+                            
                             if start <= line <= end:
-                                if file in function["file"]:
+                                if file in row_dict["file"]:
                                     # Greedy selection: track the function with smallest range
                                     # (most specific/nested function containing the line)
                                     size = end - start
+                                    logger.debug(f"Found matching function with size={size}, current smallest={self.smallest_range}")
                                     if size < self.smallest_range:
                                         self.smallest_range = size
-                                        self.best_function = function
+                                        self.best_function = row_dict
+                                        logger.debug(f"Updated best_function: {self.best_function}")
         except FileNotFoundError as e:
             raise CodeQLError(f"Function tree file not found: {function_tree_file}") from e
         except PermissionError as e:
@@ -789,6 +805,24 @@ class LLMAnalyzer:
         total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
         logger.info(f"  💬 Initial messages: {len(messages)} messages, ~{total_chars} chars")
         
+        # 🔍 DEBUG: 打印消息详细内容
+        logger.debug(f"=== DEBUG LLM MESSAGES ===")
+        for i, msg in enumerate(messages):
+            content = str(msg.get('content', ''))
+            logger.debug(f"Message {i+1} ({msg.get('role', 'unknown')}): {len(content)} chars")
+            if len(content) > 1000:
+                logger.debug(f"  Content preview: {content[:200]}...")
+            else:
+                logger.debug(f"  Content: {content}")
+        logger.debug(f"=== END DEBUG MESSAGES ===")
+        
+        # Additional safety check for context window limits
+        # Rough estimation: 1 token ≈ 4 characters for most models
+        estimated_tokens = total_chars // 4
+        if estimated_tokens > 120000:  # Conservative limit below model's 131072 token limit
+            logger.warning(f"Context window may be too large: ~{estimated_tokens} estimated tokens")
+            # For very long prompts, we could implement chunking or summarization here
+        
         # Check cache first
         if use_cache and self.cache_manager.enabled:
             cached_response = self.cache_manager.get(prompt, self.model)
@@ -817,6 +851,10 @@ class LLMAnalyzer:
             except litellm.AuthenticationError as e:
                 raise LLMApiError(f"LLM API authentication failed: {e}") from e
             except litellm.APIError as e:
+                # Special handling for context window exceeded errors
+                if "ContextWindowExceededError" in str(e) or "context length" in str(e).lower():
+                    logger.error(f"Context window exceeded! Total chars: {total_chars}. Consider reducing prompt size.")
+                    raise LLMApiError(f"Context window exceeded: {e}") from e
                 raise LLMApiError(f"LLM API error: {e}") from e
             except Exception as e:
                 # Catch any other unexpected errors from LiteLLM
@@ -835,6 +873,16 @@ class LLMAnalyzer:
             # Log message stats after each LLM response
             total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
             logger.info(f"  🔄 LLM response #{amount_of_tools + 1}: {len(messages)} messages, ~{total_chars} chars")
+            
+            # 🔍 DEBUG: 如果消息变得很大，显示详细信息
+            if total_chars > 500000:
+                logger.debug(f"=== LARGE MESSAGE DEBUG ===")
+                for i, msg in enumerate(messages):
+                    content = str(msg.get('content', ''))
+                    logger.debug(f"Message {i+1} ({msg.get('role', 'unknown')}): {len(content)} chars")
+                    if len(content) > 10000:
+                        logger.debug(f"  Large content preview: {content[:500]}...")
+                logger.debug(f"=== END LARGE MESSAGE DEBUG ===")
 
             if not tool_calls:
                 # Check if we have a recognized status code

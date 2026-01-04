@@ -183,6 +183,9 @@ def analyze_pipeline(repo: Optional[str] = None, lang: str = "c", threads: int =
         logger.error(f"❌ {e}")
         sys.exit(1)
     
+    mode = "local" if use_local_db else "remote"
+    db_path = str(Path("output/databases") / lang / db_dir) if use_local_db and db_dir else None
+
     logger.info("🚀 Starting Vulnhalla Analysis Pipeline")
     logger.info("=" * 60)
     logger.info(f"Mode: {mode.upper()}")

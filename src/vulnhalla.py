@@ -201,27 +201,39 @@ class IssueAnalyzer:
 
         return best_function
 
-    def extract_function_code(self, code_file: List[str], function_dict: Dict[str, str]) -> str:
+    def extract_function_code(self, code_file: List[str], function_dict: Dict[str, str], max_chars: int = 5000) -> str:
         """
-        Produces lines of the function's code from a list of lines.
+        Produces lines of the function's code from a list of lines, limited to max_chars.
 
         Args:
             code_file (List[str]): A list of lines for the entire file.
             function_dict (Dict[str, str]): The dictionary describing the function.
+            max_chars (int): Maximum number of characters to extract. Defaults to 5000.
 
         Returns:
-            str: A snippet string of code for the function.
+            str: A snippet string of code for the function, truncated if necessary.
         """
+
         if not function_dict:
             return ""
         start_line = int(function_dict["start_line"]) - 1
         end_line = int(function_dict["end_line"])
         snippet_lines = code_file[start_line:end_line]
-        snippet = "\n".join(
-            f"{start_line + i}: {s.replace(chr(9), '    ')}"
+        full_snippet = "\n".join(
+            f"{start_line + i + 1}: {s.replace(chr(9), '    ')}"
             for i, s in enumerate(snippet_lines)
         )
-        return snippet
+
+        # Truncate if too long
+        if len(full_snippet) > max_chars:
+            truncated = full_snippet[:max_chars]
+            # Try to cut at a line boundary
+            last_newline = truncated.rfind('\n')
+            if last_newline > max_chars * 0.8:  # If close to end, keep it
+                truncated = truncated[:last_newline]
+            full_snippet = truncated + "\n... (truncated)"
+
+        return full_snippet
 
     # ----------------------------------------------------------------------
     # 3. Text Replacement & Prompt Building
@@ -239,6 +251,7 @@ class IssueAnalyzer:
         Algorithm:
             - Parse (variable, path_type, file_path, line, offsets)
             - Resolve path: relative:// → code_path + file_path; else strip leading '/'
+            - Try both colon and underscore versions for ZIP compatibility
             - Read from src.zip, slice snippet, return "var 'snippet' (filename:line)"
 
         Args:
@@ -260,14 +273,37 @@ class IssueAnalyzer:
             end_offset = match.group(6)
 
             if path_type == "relative://":
-                full_path = code_path + file_path
+                # 拼接完整路径
+                full_path = f"{code_path}/{file_path.lstrip('/')}".replace("//", "/")
             else:
-                full_path = file_path[1:] if file_path.startswith("/") else file_path
+                # 对于 file:// 类型，直接使用原始路径（包括开头的斜杠）
+                # 因为 CSV 中的路径已经是相对于 sourceLocationPrefix 的完整路径
+                full_path = file_path
 
-            code_text = read_file_lines_from_zip(
-                str(Path(db_path) / "src.zip"),
-                full_path
-            )
+            # Try both colon and underscore versions for ZIP compatibility (Windows paths)
+            # Generate two versions of the path: with colon and with underscore
+            path_version_colon = full_path
+            path_version_underscore = full_path.replace(":", "_")
+
+            # Try to read from ZIP with both path versions
+            code_text = None
+            try:
+                # First try underscore version (Windows ZIP format)
+                code_text = read_file_lines_from_zip(
+                    str(Path(db_path) / "src.zip"),
+                    path_version_underscore
+                )
+            except CodeQLError:
+                try:
+                    # If underscore version fails, try colon version
+                    code_text = read_file_lines_from_zip(
+                        str(Path(db_path) / "src.zip"),
+                        path_version_colon
+                    )
+                except CodeQLError:
+                    # If both fail, return a placeholder
+                    return f"{variable} '[FILE NOT FOUND: {file_path}]' ({PurePosixPath(file_path).name}:{int(line_number)})"
+
             code_lines = code_text.split("\n")
             snippet = code_lines[int(line_number) - 1][int(start_offset) - 1:int(end_offset)]
 
@@ -309,10 +345,12 @@ class IssueAnalyzer:
             hints_path = templates_base / "general.template"
 
         hints = read_file_utf8(str(hints_path))
+        logger.debug(f"Loaded hints ({len(hints)} chars): {hints[:100]}...")
 
         # Read the larger general template
         template_path = templates_base / "template.template"
         template = read_file_utf8(str(template_path))
+        logger.debug(f"Loaded template ({len(template)} chars): {template[:100]}...")
 
         file_name = PurePosixPath(issue["file"]).name
         location = f"look at {file_name}:{int(issue['start_line'])} with '{snippet}'"
@@ -442,6 +480,7 @@ class IssueAnalyzer:
         Algorithm:
             - Skip references within current function range
             - For external refs: find containing function via find_function_by_line(), dedupe by dict equality
+            - Try both colon and underscore versions for ZIP compatibility
             - Append extracted function code; return updated code and functions list
 
         Args:
@@ -465,10 +504,17 @@ class IssueAnalyzer:
 
             # Resolve file path based on path type
             if path_type == "relative://":
-                file_ref = self.code_path + file_ref
+                # 拼接完整路径
+                file_ref = f"{self.code_path}/{file_ref.lstrip('/')}".replace("//", "/")
             else:
-                # Remove leading slash for absolute paths (file://)
-                file_ref = file_ref[1:] if file_ref.startswith("/") else file_ref
+                # 对于 file:// 类型，直接使用原始路径（包括开头的斜杠）
+                # 因为 CSV 中的路径已经是相对于 sourceLocationPrefix 的完整路径
+                file_ref = file_ref
+
+            # Try both colon and underscore versions for ZIP compatibility (Windows paths)
+            # Generate two versions of the path: with colon and with underscore
+            path_version_colon = file_ref
+            path_version_underscore = file_ref.replace(":", "_")
 
             # If it's within the same function's line range, skip
             start_line_func = int(current_function["start_line"])
@@ -477,15 +523,31 @@ class IssueAnalyzer:
                 continue
 
             # Find the function containing this reference using the greedy selection algorithm
-            new_function = self.find_function_by_line(function_tree_file, "/" + file_ref, int(line_ref))
+            # 使用冒号版本查找（FunctionTree.csv 中使用冒号）
+            csv_file_ref = path_version_colon
+            new_function = self.find_function_by_line(function_tree_file, csv_file_ref, int(line_ref))
             # Deduplication: Only add if function was found and not already in the list
             if new_function and new_function not in functions:
                 functions.append(new_function)
                 # Read the function's source file and extract its code
-                code_file2 = read_file_lines_from_zip(src_zip_path, file_ref).split("\n")
+                # Try both path versions for ZIP compatibility
+                code_file2 = None
+                try:
+                    # First try underscore version (Windows ZIP format)
+                    code_file2 = read_file_lines_from_zip(src_zip_path, path_version_underscore).split("\n")
+                except CodeQLError:
+                    try:
+                        # If underscore version fails, try colon version
+                        code_file2 = read_file_lines_from_zip(src_zip_path, path_version_colon).split("\n")
+                    except CodeQLError:
+                        # If both fail, skip this reference
+                        logger.warning(f"Cannot find file in ZIP for extra function reference: {file_ref}")
+                        continue
+                
+                # Only include snippet for referenced code, LLM can request full function via tools
+                ref_snippet = code_file2[int(line_ref) - 1] if int(line_ref) <= len(code_file2) else "Snippet not found"
                 code += (
-                    "\n\nfile: " + file_ref + "\n" +
-                    self.extract_function_code(code_file2, new_function)
+                    f"\n\nfile: {file_ref}:{line_ref}\n{line_ref}: {ref_snippet}"
                 )
 
         return code, functions
@@ -497,9 +559,14 @@ class IssueAnalyzer:
         llm_analyzer: LLMAnalyzer
     ) -> None:
         """
-        Processes all issues of a single type. Builds file/folder paths, runs
-        analysis, calls the LLM, and saves results.
+        处理漏洞，带有详细路径自愈追踪日志。
         """
+        # --- 强行重置日志配置，确保 DEBUG 必出 ---
+        import sys
+        from loguru import logger
+        logger.remove()  # 移除之前所有的 handler (包括那个带 filter 的)
+        logger.add(sys.stdout, level="DEBUG", format="<level>{level: <8}</level> | <cyan>{name}:{function}:{line}</cyan> - <level>{message}</level>")
+        
         results_folder = Path("output/results") / self.lang / issue_type.replace(" ", "_").replace("/", "-")
         self.ensure_directories_exist([str(results_folder)])
 
@@ -508,8 +575,8 @@ class IssueAnalyzer:
         false_issues = []
         more_data = []
 
-        logger.info(f"Found {len(issues_of_type)} issues of type {issue_type}")
-        logger.info("")
+        logger.info(f"Processing Issue Type: {issue_type} | Count: {len(issues_of_type)}")
+        
         for issue in issues_of_type:
             issue_id += 1
             self.db_path = issue["db_path"]
@@ -517,121 +584,117 @@ class IssueAnalyzer:
             db_yml_path = db_path_obj / "codeql-database.yml"
             db_yml = read_yml(str(db_yml_path))
             
-            # 1. 原始路径信息获取
-            raw_prefix = db_yml.get("sourceLocationPrefix", "")
-            raw_issue_file = issue["file"]
+            # 🔍 DEBUG: 显示当前处理的issue信息
+            logger.debug(f"=== Processing Issue {issue_id} ===")
+            logger.debug(f"Issue: {issue['name']}")
+            logger.debug(f"File: {issue['file']}")
+            logger.debug(f"Line: {issue['start_line']}:{issue['start_offset']}-{issue['end_offset']}")
+            logger.debug(f"Message: {issue['message'][:100]}...")
             
-            # 2. 核心兼容逻辑：生成用于 ZIP 检索和 CSV 匹配的两种路径
-            # 统一转为正斜杠并去掉前后空格/斜杠
-            p_prefix = raw_prefix.replace("\\", "/").strip("/")
-            p_file = raw_issue_file.replace("\\", "/").lstrip("/")
-
-            # 拼接完整逻辑路径
-            if p_prefix and p_file.startswith(p_prefix):
-                full_logical_path = p_file
+            # --- 路径自愈与追踪 ---
+            source_prefix = db_yml.get("sourceLocationPrefix", "").replace("\\", "/")
+            drive_letter = source_prefix.split(":")[0] if ":" in source_prefix else ""
+            raw_issue_file = issue["file"].replace("\\", "/")
+            
+            if ":" in raw_issue_file:
+                full_logical_path = raw_issue_file.lstrip("/")
             else:
-                full_logical_path = f"{p_prefix}/{p_file}".replace("//", "/")
+                full_logical_path = f"{source_prefix.rstrip('/')}/{raw_issue_file.lstrip('/')}"
 
-            # 生成两个版本的候选路径：A(带冒号 F:/) 和 B(带下划线 F_/)
-            path_version_colon = full_logical_path.replace("_/", ":/") if "_/" in full_logical_path else full_logical_path
-            if ":" in full_logical_path:
-                path_version_underscore = full_logical_path.replace(":", "_")
-            else:
-                path_version_underscore = full_logical_path
+            if full_logical_path.startswith(":/"):
+                full_logical_path = (drive_letter or "F") + full_logical_path
 
-            # 3. 确定数据库文件路径
+            path_version_colon = full_logical_path
+            path_version_underscore = path_version_colon.replace(":", "_", 1)
+
+            logger.debug(f"Issue {issue_id} Path Mapping Trace:")
+            logger.debug(f"  - ZIP Target: {path_version_underscore}")
+
+            # --- 尝试读取 ZIP ---
+            self.code_path = source_prefix
             function_tree_file = str(db_path_obj / "FunctionTree.csv")
             src_zip_path = str(db_path_obj / "src.zip")
 
-            # 4. 尝试读取 ZIP：兼容 Windows(F_/) 和 Linux/原生路径
-            code_file_contents_raw = read_file_lines_from_zip(src_zip_path, path_version_underscore)
-            if not code_file_contents_raw:
-                # 备选方案：尝试带冒号的原始路径
-                code_file_contents_raw = read_file_lines_from_zip(src_zip_path, path_version_colon)
+            code_file_contents_raw = None
+            try:
+                code_file_contents_raw = read_file_lines_from_zip(src_zip_path, path_version_underscore)
+            except Exception:
+                try:
+                    code_file_contents_raw = read_file_lines_from_zip(src_zip_path, path_version_colon)
+                except Exception as e:
+                    logger.error(f"Issue {issue_id} Extraction Error: {str(e)}")
+                    continue
             
             if not code_file_contents_raw:
-                logger.warning(f"issue {issue_id}: Cannot find file in ZIP! Tried: {path_version_underscore} and {path_version_colon}")
                 continue
             
             code_file_contents = code_file_contents_raw.split("\n")
-
-            # 5. 寻找函数：CSV 匹配不应带开头的 "/"
-            # 根据你提供的 CSV 结构，直接传入带盘符的路径
             current_function = self.find_function_by_line(
-                function_tree_file,
-                path_version_colon, 
-                int(issue["start_line"])
+                function_tree_file, path_version_colon, int(issue["start_line"])
             )
             
             if not current_function:
-                logger.warning(f"issue {issue_id}: Can't find the function in CSV! Path: {path_version_colon}")
+                logger.warning(f"Issue {issue_id}: Function not found. Path: {path_version_colon}")
                 continue
 
-            # 6. 后续逻辑保持不变
-            snippet = code_file_contents[int(issue["start_line"]) - 1][
-                int(issue["start_offset"]) - 1:int(issue["end_offset"])
-            ]
-
-            code = (
-                "file: " + path_version_colon + "\n" +
-                self.extract_function_code(code_file_contents, current_function)
+            # 提取片段与构建 Prompt
+            start_idx = int(issue["start_line"]) - 1
+            snippet = code_file_contents[start_idx][int(issue["start_offset"]) - 1:int(issue["end_offset"])]
+            
+            function_start = int(current_function["start_line"]) - 1
+            function_end = int(current_function["end_line"])
+            function_lines = code_file_contents[function_start:function_end]
+            
+            if self.lang == "javascript":
+                max_function_lines = 200
+                if len(function_lines) > max_function_lines:
+                    logger.warning(f"JS function truncated to {max_function_lines}")
+                    function_lines = function_lines[:max_function_lines]
+            
+            function_code = "\n".join(
+                f"{function_start + i + 1}: {line.replace(chr(9), '    ')}"
+                for i, line in enumerate(function_lines)
             )
-
-            # Replace bracket refs in message
+            
+            code = f"file: {path_version_colon}\n{function_code}"
             bracket_pattern = r'\[\["(.*?)"\|"((?:relative://|file://))?(/.*?):(\d+):(\d+):\d+:(\d+)"\]\]'
             transform_func = self.create_bracket_reference_replacer(self.db_path, self.code_path)
             message = re.sub(bracket_pattern, transform_func, issue["message"])
 
-            # Find extra refs for context expansion
-            extra_lines_pattern = r'\[\[".*?"\|"((?:relative://|file://)?)(/.*?):(\d+):\d+:\d+:\d+"\]\]'
-            extra_lines = re.findall(extra_lines_pattern, issue["message"])
-            functions = [current_function]
-
-            if extra_lines:
-                code, functions = self.append_extra_functions(
-                    extra_lines, function_tree_file, src_zip_path, code, current_function
-                )
-
             prompt = self.build_prompt_by_template(issue, message, snippet, code)
+            
+            # --- 关键：仅限制 logger.debug 的打印长度，不影响发送给 LLM 的 prompt ---
+            logger.info(f"Prompt length: {len(prompt)} characters")
+            logger.debug("=== DEBUG PROMPT PREVIEW (Max 2000 chars) ===")
+            logger.debug(prompt[:2000] + ("... [TRUNCATED IN LOG]" if len(prompt) > 2000 else ""))
+            logger.debug("=== END PROMPT PREVIEW ===")
 
-            # Save raw input to the LLM
-            self.save_raw_input_data(prompt, function_tree_file, current_function, results_folder, issue_id)
+            # 打印各组件长度分析
+            file_name = PurePosixPath(issue["file"]).name
+            location = f"look at {file_name}:{int(issue['start_line'])} with '{snippet}'"
+            parts = {'name': len(issue['name']), 'message': len(message), 'location': len(location), 'code': len(code)}
+            logger.debug(f"Parts length: {parts}")
 
-            # Send to LLM
-            messages, content = llm_analyzer.run_llm_security_analysis(
-                prompt,
-                function_tree_file,
-                current_function,
-                functions,
-                self.db_path
-            )
-            gpt_result = self.format_llm_messages(messages)
-            final_file = Path(results_folder) / f"{issue_id}_final.json"
-            write_file_ascii(str(final_file), gpt_result)
+            # 发送请求
+            try:
+                messages, content = llm_analyzer.run_llm_security_analysis(
+                    prompt, function_tree_file, current_function, [current_function], self.db_path
+                )
+                
+                gpt_result = self.format_llm_messages(messages)
+                write_file_ascii(str(Path(results_folder) / f"{issue_id}_final.json"), gpt_result)
 
-            # Check status code in LLM content
-            status = self.determine_issue_status(content)
-            if status == "true":
-                real_issues.append(issue_id)
-                status = "True Positive"
-            elif status == "false":
-                false_issues.append(issue_id)
-                status = "False Positive"
-            else:
-                more_data.append(issue_id)
-                status = "LLM needs More Data"
+                status = self.determine_issue_status(content)
+                if status == "true": real_issues.append(issue_id)
+                elif status == "false": false_issues.append(issue_id)
+                else: more_data.append(issue_id)
 
-            # Log issue status
-            logger.info(f"Issue ID: {issue_id}, LLM decision: → {status}")
+                logger.info(f"Issue {issue_id}: Analysis complete -> {status}")
+            except Exception as e:
+                logger.error(f"LLM Call Failed for Issue {issue_id}: {str(e)}")
+                # 这里会打印出具体的 ContextWindowExceededError
 
-        logger.info("")
-        logger.info(f"Issue type: {issue_type}")
-        logger.info(f"Total issues: {len(issues_of_type)}")
-        logger.info(f"True Positive: {len(real_issues)}")
-        logger.info(f"False Positive: {len(false_issues)}")
-        logger.info(f"LLM needs More Data: {len(more_data)}")
-        logger.info("")
-    
+        logger.info(f"Summary for {issue_type}: TP={len(real_issues)}, FP={len(false_issues)}")
     def run(self) -> None:
         """
         Main analysis routine:
@@ -704,12 +767,10 @@ class IssueAnalyzer:
             self.process_issue_type(issue_type, issues_statistics[issue_type], llm_analyzer)
 
 if __name__ == '__main__':
-    # Initialize logging
     from src.utils.logger import setup_logging
-    setup_logging()
+    # 使用 force=True 确保 DEBUG 级别被正确应用
+    setup_logging(log_level="DEBUG", force=True)
     
-    # Loads configuration from .env file
-    # Or use: analyzer = IssueAnalyzer(lang="c", config={...})
-    analyzer = IssueAnalyzer(lang="c")
+    analyzer = IssueAnalyzer(lang="javascript") # 根据你的执行命令修改
     analyzer.run()
 

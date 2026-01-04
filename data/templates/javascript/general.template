@@ -1,4 +1,7 @@
-1. Is this a real security issue that you can exploit?
-2. For JavaScript/Node.js: Check if this affects user input handling, eval(), child_process, or sensitive data exposure.
-3. Consider the context: Is this in client-side code, server-side code, or shared libraries?
-4. Verify if the vulnerable code path is actually reachable and can be triggered by an attacker.
+1. Focus on the **vulnerable line** - is this really exploitable?
+2. Check user input handling, eval(), child_process, prototype pollution.
+3. **Context Check (CRITICAL):** - If the file path contains 'assets/','asset/' 'static/', or '/public/', it is likely a client-side static resource.
+   - For client-side JS, consider if the "attacker" is just the user themselves (Self-XSS), which usually means it's a False Positive (1007).
+   - Prioritize server-side (Node.js) logic over bundled frontend assets.
+4. Is the vulnerable code reachable and triggerable by attackers?
+5. What data/integrity impact if this vulnerability is exploited?

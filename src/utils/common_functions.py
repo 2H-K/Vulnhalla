@@ -112,32 +112,35 @@ def get_all_dbs(dbs_folder: str) -> List[str]:
 
 
 def read_file_lines_from_zip(zip_path: str, file_path_in_zip: str) -> str:
-    """
-    Read text from a single file within a ZIP archive (UTF-8).
-
-    Args:
-        zip_path (str): The path to the ZIP file.
-        file_path_in_zip (str): The internal path within the ZIP to the file.
-
-    Returns:
-        str: The contents of the file (as UTF-8) located within the ZIP.
+    # 路径自愈逻辑
+    processed_path = file_path_in_zip.replace("\\", "/")
     
-    Raises:
-        CodeQLError: If ZIP file cannot be read or file not found in archive.
-    """
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            with zip_ref.open(file_path_in_zip) as file:
-                return file.read().decode('utf-8')
-    except zipfile.BadZipFile as e:
-        raise CodeQLError(f"Invalid or corrupted ZIP file: {zip_path}") from e
-    except KeyError as e:
-        raise CodeQLError(f"File '{file_path_in_zip}' not found in ZIP archive: {zip_path}") from e
-    except PermissionError as e:
-        raise CodeQLError(f"Permission denied reading ZIP file: {zip_path}") from e
-    except OSError as e:
-        raise CodeQLError(f"OS error while reading ZIP file: {zip_path}") from e
+    # 如果路径以 :/ 开头，说明盘符丢失，尝试恢复或清理
+    if processed_path.startswith(":/"):
+        # 移除前面的 :/，使其变为 Code_Audit/...
+        processed_path = processed_path.lstrip(":/")
+        # 如果能从 zip_path 猜到盘符（通常是 F_ 或 D_），可以补全，
+        # 但 CodeQL ZIP 内部通常是 [盘符]_/ 开头，所以直接补 F_ 是最常见的
+        processed_path = "F_/" + processed_path
+    
+    # 核心：确保冒号转为下划线以匹配 Windows 版 CodeQL ZIP 结构
+    if ":" in processed_path:
+        processed_path = processed_path.replace(":", "_", 1)
 
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            # 尝试直接读取
+            try:
+                with z.open(processed_path) as file:
+                    return file.read().decode('utf-8')
+            except KeyError:
+                # 备选：如果还是找不到，尝试去掉所有前导斜杠
+                alt_path = processed_path.lstrip("/")
+                with z.open(alt_path) as file:
+                    return file.read().decode('utf-8')
+    except Exception as e:
+        # 这里会抛出包含实际尝试路径的错误，配合增强后的 Logger 非常好定位
+        raise CodeQLError(f"ZIP Error: Could not find {processed_path} in {zip_path}. Inner error: {str(e)}")
 
 def read_yml(file_path: str) -> Dict[str, Any]:
     """

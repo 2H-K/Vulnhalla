@@ -1,22 +1,23 @@
-### Issue Overview
+### Issue
 Name: {name}
 Description: {description}
 Message: {message}
 Location: {location}
 
-### Hints for Validation
+### Hints
 {hints}
 
-### Code
+### Code Context
 {code}
 
-### Analysis Instructions
-- Determine if this is a true security vulnerability or a false positive
-- For JavaScript/Node.js: Consider XSS, Prototype Pollution, Command Injection, ReDoS, and Dependency Vulnerabilities
-- Check if the vulnerable code is actually reachable and can be triggered
-- Evaluate the impact and exploitability of this issue
+<!-- 注意：如果代码过长，请关注核心逻辑部分 -->
+
+### Analysis
+For JavaScript: Check XSS, eval(), child_process, prototype pollution.
+Focus on the **vulnerable line** identified above and its surrounding context.
+Determine if this is exploitable and has security impact.
 
 Respond with:
-- "1337" if this is a TRUE POSITIVE security issue
-- "1007" if this is a FALSE POSITIVE (not exploitable, benign code, or unreachable)
-- Otherwise, provide more details about why you need additional context
+- "1337" = TRUE POSITIVE (exploitable vulnerability)
+- "1007" = FALSE POSITIVE (safe code, not exploitable)
+- Otherwise provide details needed

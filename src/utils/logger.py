@@ -1,112 +1,65 @@
-#!/usr/bin/env python3
-"""
-Centralized logging configuration for Vulnhalla using loguru.
-"""
-
 import sys
 import os
 from pathlib import Path
 from typing import Optional
-
 from loguru import logger
 
 _logging_initialized = False
-
-
-def reset_logging() -> None:
-    """Reset logging state."""
-    global _logging_initialized
-    logger.remove()
-    _logging_initialized = False
-
 
 def setup_logging(
     log_level: Optional[str] = None,
     log_file: Optional[str] = None,
     log_format: Optional[str] = None,
     json_format: bool = False,
-    simple_format: bool = False
+    simple_format: bool = False,
+    force: bool = False  # 新增：允许强制重置配置
 ) -> None:
-    """Configure logging using loguru."""
     global _logging_initialized
     
-    if _logging_initialized:
+    # 如果已经初始化且不是强制重置，则直接返回
+    if _logging_initialized and not force:
         return
     
+    # 清除之前所有的 handler，防止日志重复输出
     logger.remove()
     
-    level = log_level or os.getenv("LOG_LEVEL", "INFO").upper()
-    log_file_path = log_file or os.getenv("LOG_FILE")
-    log_format_str = log_format or os.getenv("LOG_FORMAT", "default")
-    use_verbose = os.getenv("LOG_VERBOSE_CONSOLE", "false").lower() == "true"
-    use_simple = simple_format or os.getenv("LOG_SIMPLE_FORMAT", "false").lower() == "true"
+    # 确定日志级别：优先使用显式传入的参数，其次是环境变量，最后默认 DEBUG
+    level = log_level or os.getenv("LOG_LEVEL", "DEBUG").upper()
     
-    # 定义第三方库的过滤逻辑
-    tp_level = os.getenv("THIRD_PARTY_LOG_LEVEL", "ERROR").upper()
     def main_filter(record):
-        # 排除掉干扰较大的第三方库，除非达到 ERROR 级别
-        tp_modules = ["LiteLLM", "urllib3", "requests", "openai"]
-        if any(record["name"].startswith(m) for m in tp_modules):
-            return record["level"].no >= logger.level(tp_level).no
-        return True
+        # 允许查看 LiteLLM 的核心错误，但过滤掉冗余的连接信息
+        tp_modules = ["urllib3", "requests", "openai", "asyncio"]
+        # 如果是 DEBUG 模式，我们可能希望看到 LiteLLM 的一些关键信息
+        if level == "DEBUG":
+            return not any(record["name"].startswith(m) for m in tp_modules)
+        # 非 DEBUG 模式下也过滤 LiteLLM
+        return not any(record["name"].startswith(m) for m in ["LiteLLM"] + tp_modules)
 
-    # 1. Console Handler 配置
-    if json_format or log_format_str.lower() == "json":
-        logger.add(sys.stdout, level=level, serialize=True, filter=main_filter)
+    # 包含文件、函数、行号的详细格式
+    fmt = (
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}:{function}:{line}</cyan> - <level>{message}</level>"
+    )
     
-    elif use_verbose:
-        # 详细模式：显示时间、级别、源码位置
-        fmt = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
-        logger.add(sys.stdout, format=fmt, level=level, colorize=True, filter=main_filter)
-        
-    elif use_simple:
-        # 极简模式：只显示消息本身
-        logger.add(sys.stdout, format="<level>{message}</level>", level=level, colorize=True, filter=main_filter)
-        
-    else:
-        # 默认模式：INFO 级别简洁，WARNING 以上带前缀
-        logger.add(
-            sys.stdout,
-            format="<level>{message}</level>",
-            level="INFO",
-            filter=main_filter,
-            colorize=True
-        )
-        logger.add(
-            sys.stdout,
-            format="<level>{level: <8}</level> | <level>{message}</level>",
-            level="WARNING",
-            filter=main_filter,
-            colorize=True
-        )   
-    # 2. File Handler 配置
-    if log_file_path:
-        try:
-            Path(log_file_path).parent.mkdir(parents=True, exist_ok=True)
-            logger.add(
-                log_file_path,
-                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-                level="DEBUG",
-                rotation="10 MB",
-                retention="10 days",
-                encoding="utf-8",
-                filter=main_filter
-            )
-        except Exception as e:
-            # 此时 Console 已经配置好，可以使用 logger 发出警告
-            logger.warning(f"Failed to set up file logging: {e}")
+    # 添加控制台处理器
+    logger.add(
+        sys.stdout, 
+        format=fmt, 
+        level=level, 
+        colorize=True, 
+        filter=main_filter, 
+        backtrace=True, 
+        diagnose=True
+    )
     
     _logging_initialized = True
-
+    logger.debug(f"Logging initialized with level: {level}")
 
 def get_logger(name: str):
-    """Get a logger instance for a module."""
     if not _logging_initialized:
         setup_logging()
-    # 使用 bind 为该模块的日志打上特定的 'name' 标签
-    return logger.bind(name=name)
+    return logger.bind(module_name=name)
 
-
-# 自动初始化逻辑
-if os.getenv("VULNHALLA_AUTO_SETUP_LOGGING", "true").lower() == "true":
-    setup_logging()
+# 默认自动初始化一次（保持原有行为）
+setup_logging()
