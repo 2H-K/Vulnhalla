@@ -1,0 +1,5 @@
+1. Is this a real command injection vulnerability?
+2. Check if the command string includes user-controlled input (request parameters, form data, environment variables)
+3. Verify if the command execution function (exec, spawn, execSync, spawnSync) is actually called with tainted data
+4. Consider if input validation or sanitization is applied before command execution
+5. Evaluate the impact: Can an attacker execute arbitrary commands on the server?

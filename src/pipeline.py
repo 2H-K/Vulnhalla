@@ -8,6 +8,7 @@ This module coordinates the complete analysis pipeline:
 4. Open UI (optional)
 """
 import sys
+import argparse
 from pathlib import Path
 from typing import Optional
 
@@ -48,16 +49,18 @@ def _log_exception_cause(e: Exception) -> None:
             logger.error(f"   Cause: {cause}")
 
 
-def analyze_pipeline(repo: Optional[str] = None, lang: str = "c", threads: int = 16, open_ui: bool = True) -> None:
+def analyze_pipeline(repo: Optional[str] = None, lang: str = "c", threads: int = 16, open_ui: bool = True, use_local_db: bool = False, db_dir: Optional[str] = None) -> None:
     """
     Run the complete Vulnhalla pipeline: fetch, analyze, classify, and optionally open UI.
-    
+
     Args:
         repo: Optional GitHub repository name (e.g., "redis/redis"). If None, fetches top repos.
         lang: Programming language code. Defaults to "c".
         threads: Number of threads for CodeQL operations. Defaults to 16.
         open_ui: Whether to open the UI after completion. Defaults to True.
-    
+        use_local_db: Whether to use local databases instead of fetching. Defaults to False.
+        db_dir: Database directory name when using local databases. Defaults to None.
+
     Note:
         This function catches and handles all exceptions internally, logging errors
         and exiting with code 1 on failure. It does not raise exceptions.
@@ -82,27 +85,43 @@ See README.md for configuration reference.
         _log_exception_cause(e)
         sys.exit(1)
     
-    try:
-        # Step 1: Fetch CodeQL databases
-        logger.info("\n[1/4] Fetching CodeQL Databases")
+    if not use_local_db:
+        try:
+            # Step 1: Fetch CodeQL databases
+            logger.info("\n[1/4] Fetching CodeQL Databases")
+            logger.info("-" * 60)
+            if repo:
+                logger.info(f"Fetching database for: {repo}")
+                fetch_codeql_dbs(lang=lang, threads=threads, single_repo=repo)
+            else:
+                logger.info(f"Fetching top repositories for language: {lang}")
+                fetch_codeql_dbs(lang=lang, max_repos=100, threads=4)
+        except CodeQLConfigError as e:
+            logger.error(f"❌ Configuration error while fetching CodeQL databases: {e}")
+            _log_exception_cause(e)
+            logger.error("   Please check your GitHub token and permissions.")
+            sys.exit(1)
+        except CodeQLError as e:
+            logger.error(f"❌ Failed to fetch CodeQL databases: {e}")
+            _log_exception_cause(e)
+            logger.error("   Please check file permissions, disk space, and GitHub API access.")
+            sys.exit(1)
+    else:
+        logger.info("\n[1/4] Using Local CodeQL Databases")
         logger.info("-" * 60)
-        if repo:
-            logger.info(f"Fetching database for: {repo}")
-            fetch_codeql_dbs(lang=lang, threads=threads, single_repo=repo)
+        logger.info("Skipping fetch step, using local databases.")
+
+        # Check if local database exists
+        if db_dir:
+            db_path = Path("output/databases") / lang / db_dir
+            if not db_path.exists():
+                logger.error(f"❌ Local database path not found: {db_path}")
+                logger.error("   Please manually place the CodeQL database in the correct location.")
+                sys.exit(1)
         else:
-            logger.info(f"Fetching top repositories for language: {lang}")
-            fetch_codeql_dbs(lang=lang, max_repos=100, threads=4)
-    except CodeQLConfigError as e:
-        logger.error(f"❌ Configuration error while fetching CodeQL databases: {e}")
-        _log_exception_cause(e)
-        logger.error("   Please check your GitHub token and permissions.")
-        sys.exit(1)
-    except CodeQLError as e:
-        logger.error(f"❌ Failed to fetch CodeQL databases: {e}")
-        _log_exception_cause(e)
-        logger.error("   Please check file permissions, disk space, and GitHub API access.")
-        sys.exit(1)
-    
+            logger.error("❌ Local database mode requires specifying a database directory.")
+            sys.exit(1)
+
     try:
         # Step 2: Run CodeQL queries
         logger.info("\n[2/4] Running CodeQL Queries")
@@ -132,7 +151,7 @@ See README.md for configuration reference.
         # Step 3: Classify results with LLM
         logger.info("\n[3/4] Classifying Results with LLM")
         logger.info("-" * 60)
-        analyzer = IssueAnalyzer(lang=lang)
+        analyzer = IssueAnalyzer(lang=lang, db_dir=db_dir if use_local_db else None)
         analyzer.run()
     except LLMConfigError as e:
         logger.error(f"❌ LLM configuration error: {e}")
@@ -177,19 +196,41 @@ def main_analyze() -> None:
     """
     CLI entry point for the complete analysis pipeline.
     Usage:
-        vulnhalla-analyze                    # Analyze top 100 repos
-        vulnhalla-analyze redis/redis        # Analyze specific repo
+        vulnhalla-analyze                           # Analyze top 100 repos
+        vulnhalla-analyze redis/redis               # Analyze specific repo
+        vulnhalla-analyze local-db <db_dir>         # Use local database in specified directory
+        --language, -l: Programming language (c, java, or javascript, default: c)
     """
-    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Vulnhalla Analysis Pipeline")
+    parser.add_argument("command", nargs="?", help="Command: 'local-db' or GitHub repository name (e.g., 'redis/redis')")
+    parser.add_argument("db_dir", nargs="?", help="Database directory name when using local-db")
+    parser.add_argument("--language", "-l", default="c", choices=["c", "java", "javascript"],
+                       help="Programming language (default: c)")
+
+    args = parser.parse_args()
+
+    # Parse arguments
     repo = None
-    if len(sys.argv) > 1:
-        repo = sys.argv[1]
+    db_dir = None
+    use_local_db = False
+
+    if args.command == "local-db":
+        use_local_db = True
+        db_dir = args.db_dir
+        if not db_dir:
+            logger.error("❌ Error: When using local-db, you must specify a database directory name")
+            logger.error("   Example: python src/pipeline.py local-db redis --language c")
+            sys.exit(1)
+    elif args.command:
+        repo = args.command
         if "/" not in repo:
             logger.error("❌ Error: Repository must be in format 'org/repo'")
             logger.error("   Example: python src/pipeline.py redis/redis")
             logger.error("   Or run without arguments to analyze top repositories")
             sys.exit(1)
-    analyze_pipeline(repo=repo)
+    # If no command, repo remains None for top repos
+
+    analyze_pipeline(repo=repo, lang=args.language, use_local_db=use_local_db, db_dir=db_dir)
 
 
 if __name__ == '__main__':

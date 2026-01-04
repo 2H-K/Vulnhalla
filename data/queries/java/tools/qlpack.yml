@@ -1,0 +1,4 @@
+name: vulnhalla-java
+version: 0.0.0
+dependencies:
+  codeql/java-all: "*"
