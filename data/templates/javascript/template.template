@@ -1,3 +1,6 @@
+### Quick Check
+First, check if this is client-side static resource code (assets, dist, vendor, etc.). If yes, respond with "1007" immediately.
+
 ### Issue
 Name: {name}
 Description: {description}

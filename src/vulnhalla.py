@@ -43,6 +43,27 @@ from src.utils.logger import get_logger
 from src.utils.exceptions import VulnhallaError, CodeQLError
 
 logger = get_logger(__name__)
+# For JS beautification
+try:
+    import jsbeautifier
+    JS_BEAUTIFIER_AVAILABLE = True
+except ImportError:
+    JS_BEAUTIFIER_AVAILABLE = False
+    logger.warning("jsbeautifier not installed. JS minified files may cause issues.")
+
+# Static resource blacklist for skipping LLM analysis
+STATIC_RESOURCE_PATTERNS = [
+    r'/assets/',
+    r'/static/',
+    r'/dist/',
+    r'/node_modules/',
+    r'/public/',
+    r'/vendor/',
+    r'/build/',
+    r'\.min\.js$',
+    r'/third_party/',
+    r'/external/',
+]
 
 
 class IssueAnalyzer:
@@ -65,6 +86,21 @@ class IssueAnalyzer:
         self.code_path: Optional[str] = None
         self.config = config
         self.db_dir = db_dir
+
+    def is_static_resource(self, file_path: str) -> bool:
+        """
+        Check if the file path matches static resource patterns that should be skipped.
+
+        Args:
+            file_path (str): The file path to check.
+
+        Returns:
+            bool: True if it's a static resource, False otherwise.
+        """
+        for pattern in STATIC_RESOURCE_PATTERNS:
+            if re.search(pattern, file_path, re.IGNORECASE):
+                return True
+        return False
 
     # ----------------------------------------------------------------------
     # 1. CSV Parsing and Data Gathering
@@ -576,14 +612,21 @@ class IssueAnalyzer:
         more_data = []
 
         logger.info(f"Processing Issue Type: {issue_type} | Count: {len(issues_of_type)}")
-        
+
         for issue in issues_of_type:
             issue_id += 1
+
+            # Check if it's a static resource - skip LLM analysis
+            if self.is_static_resource(issue["file"]):
+                logger.info(f"Issue {issue_id}: Skipped static resource -> false")
+                false_issues.append(issue_id)
+                continue
+
             self.db_path = issue["db_path"]
             db_path_obj = Path(self.db_path)
             db_yml_path = db_path_obj / "codeql-database.yml"
             db_yml = read_yml(str(db_yml_path))
-            
+
             # 🔍 DEBUG: 显示当前处理的issue信息
             logger.debug(f"=== Processing Issue {issue_id} ===")
             logger.debug(f"Issue: {issue['name']}")
@@ -624,10 +667,21 @@ class IssueAnalyzer:
                 except Exception as e:
                     logger.error(f"Issue {issue_id} Extraction Error: {str(e)}")
                     continue
-            
+
             if not code_file_contents_raw:
                 continue
-            
+
+            # Beautify JS code if it's minified
+            if self.lang == "javascript" and JS_BEAUTIFIER_AVAILABLE:
+                # Check if it's likely minified (single line with many chars or few lines)
+                lines = code_file_contents_raw.split("\n")
+                if len(lines) <= 5 or (len(lines) == 1 and len(code_file_contents_raw) > 10000):
+                    try:
+                        code_file_contents_raw = jsbeautifier.beautify(code_file_contents_raw)
+                        logger.debug(f"Issue {issue_id}: JS code beautified")
+                    except Exception as e:
+                        logger.warning(f"Issue {issue_id}: JS beautification failed: {str(e)}")
+
             code_file_contents = code_file_contents_raw.split("\n")
             current_function = self.find_function_by_line(
                 function_tree_file, path_version_colon, int(issue["start_line"])
@@ -645,16 +699,45 @@ class IssueAnalyzer:
             function_end = int(current_function["end_line"])
             function_lines = code_file_contents[function_start:function_end]
             
-            if self.lang == "javascript":
-                max_function_lines = 200
-                if len(function_lines) > max_function_lines:
-                    logger.warning(f"JS function truncated to {max_function_lines}")
-                    function_lines = function_lines[:max_function_lines]
+            # 根据语言设置不同的字符限制（确保不超过 LLM 上下文窗口）
+            max_chars_by_lang = {
+                "javascript": 4000,   # JavaScript: 4k chars (更严格，防止压缩文件)
+                "java": 12000,       # Java: 12k chars ≈ 3000 tokens
+                "c": 12000,          # C/C++: 12k chars ≈ 3000 tokens
+                "python": 10000,     # Python: 10k chars
+                "go": 10000,         # Go: 10k chars
+                "default": 10000     # 其他语言: 10k chars ≈ 2500 tokens
+            }
+            max_chars = max_chars_by_lang.get(self.lang, max_chars_by_lang["default"])
             
-            function_code = "\n".join(
-                f"{function_start + i + 1}: {line.replace(chr(9), '    ')}"
-                for i, line in enumerate(function_lines)
+            # 对 JavaScript 特别处理：检查是否为压缩/混淆文件
+            if self.lang == "javascript":
+                max_function_lines = 100  # 减少行数限制以避免单行大文件
+                if len(function_lines) > max_function_lines:
+                    logger.warning(f"JS function truncated to {max_function_lines} lines")
+                    function_lines = function_lines[:max_function_lines]
+                    
+                # 检查是否为压缩文件（单行包含大量字符）
+                if len(function_lines) == 1 and len(function_lines[0]) > 50000:
+                    logger.warning("Detected minified JavaScript file, applying aggressive truncation")
+                    max_chars = 3000  # 对压缩文件使用更严格的限制
+            
+            # 优先使用 extract_function_code 方法进行智能截断
+            function_dict = {
+                "start_line": current_function["start_line"],
+                "end_line": current_function["end_line"]
+            }
+            
+            function_code = self.extract_function_code(
+                code_file_contents, function_dict, max_chars
             )
+            
+            # 严格检查确保截断有效（防止超出 LLM 限制）
+            if len(function_code) > max_chars:
+                function_code = function_code[:max_chars] + "\n... (truncated due to length limits)"
+                logger.debug(f"Strict truncation applied: limited to {max_chars} chars")
+            
+            logger.debug(f"Function code length: {len(function_code)} chars (limit: {max_chars})")
             
             code = f"file: {path_version_colon}\n{function_code}"
             bracket_pattern = r'\[\["(.*?)"\|"((?:relative://|file://))?(/.*?):(\d+):(\d+):\d+:(\d+)"\]\]'

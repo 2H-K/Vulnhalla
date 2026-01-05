@@ -671,18 +671,20 @@ class LLMAnalyzer:
     def extract_function_from_file(
         self,
         db_path: str,
-        current_function: Union[str, Dict[str, str]]
+        current_function: Union[str, Dict[str, str]],
+        max_chars: int = 20000
     ) -> str:
         """
         Return the snippet of code for the given current_function from the archived src.zip.
-        
+
         Args:
             db_path (str): Path to the CodeQL database directory.
             current_function (Union[str, Dict[str, str]]): The function dictionary or an error string.
-        
+            max_chars (int): Maximum characters to return. Defaults to 20000.
+
         Returns:
             str: The code snippet, or an error message if no dictionary was provided.
-        
+
         Raises:
             CodeQLError: If ZIP file cannot be read or file not found in archive.
                 This exception is raised by `read_file_lines_from_zip()` and propagated here.
@@ -702,6 +704,12 @@ class LLMAnalyzer:
         snippet = "\n".join(
             f"{start_line - 1 + i}: {text}" for i, text in enumerate(snippet_lines)
         )
+
+        # Token fuse: Truncate if too long
+        if len(snippet) > max_chars:
+            snippet = snippet[:max_chars] + "\n... (truncated due to length limits)"
+            logger.warning(f"Function code truncated to {max_chars} chars for {file_path}")
+
         return f"file: {file_path}\n{snippet}"
 
     def map_func_args_by_llm(
@@ -918,11 +926,11 @@ class LLMAnalyzer:
                         )
                         if isinstance(child_function, dict):
                             all_functions.append(child_function)
-                            child_code = self.extract_function_from_file(db_path_clean, child_function)
+                            child_code = self.extract_function_from_file(db_path_clean, child_function, max_chars=20000)
                             response_msg = child_code
 
                         if isinstance(child_function, dict) and isinstance(parent_function, dict):
-                            caller_code = self.extract_function_from_file(db_path_clean, parent_function)
+                            caller_code = self.extract_function_from_file(db_path_clean, parent_function, max_chars=20000)
                             args_content = self.map_func_args_by_llm(caller_code, child_code)
                             arg_messages.append({
                                 "role": args_content.role,
@@ -935,14 +943,14 @@ class LLMAnalyzer:
 
                         if isinstance(caller_function, dict):
                             all_functions.append(caller_function)
-                            caller_code = self.extract_function_from_file(db_path_clean, caller_function)
+                            caller_code = self.extract_function_from_file(db_path_clean, caller_function, max_chars=20000)
                             response_msg = (
                                 f"Here is the caller function for '{current_function['function_name']}':\n"
                                 + caller_code
                             )
                             args_content = self.map_func_args_by_llm(
                                 caller_code,
-                                self.extract_function_from_file(db_path_clean, current_function)
+                                self.extract_function_from_file(db_path_clean, current_function, max_chars=20000)
                             )
                             arg_messages.append({
                                 "role": args_content.role,
@@ -960,7 +968,7 @@ class LLMAnalyzer:
                     elif tool_function_name == 'get_global_var' and "global_var_name" in tool_args:
                         global_var = self.get_global_var(db_path_clean, tool_args["global_var_name"])
                         if isinstance(global_var, dict):
-                            global_var_code = self.extract_function_from_file(db_path_clean, global_var)
+                            global_var_code = self.extract_function_from_file(db_path_clean, global_var, max_chars=20000)
                             response_msg = global_var_code
                         else:
                             response_msg = global_var
@@ -968,7 +976,7 @@ class LLMAnalyzer:
                     elif tool_function_name == 'get_class' and "object_name" in tool_args:
                         curr_class = self.get_class(db_path_clean, tool_args["object_name"])
                         if isinstance(curr_class, dict):
-                            class_code = self.extract_function_from_file(db_path_clean, curr_class)
+                            class_code = self.extract_function_from_file(db_path_clean, curr_class, max_chars=20000)
                             response_msg = class_code
                         else:
                             response_msg = curr_class

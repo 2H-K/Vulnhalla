@@ -1,7 +1,34 @@
-1. Focus on the **vulnerable line** - is this really exploitable?
-2. Check user input handling, eval(), child_process, prototype pollution.
-3. **Context Check (CRITICAL):** - If the file path contains 'assets/','asset/' 'static/', or '/public/', it is likely a client-side static resource.
-   - For client-side JS, consider if the "attacker" is just the user themselves (Self-XSS), which usually means it's a False Positive (1007).
-   - Prioritize server-side (Node.js) logic over bundled frontend assets.
-4. Is the vulnerable code reachable and triggerable by attackers?
-5. What data/integrity impact if this vulnerability is exploited?
+1. **聚焦于真正可被远程利用的漏洞代码行**  
+   - 仅当该代码能被外部攻击者（非当前用户自身）触发时，才视为有效漏洞。
+   - 若漏洞仅在用户自己操作自己的浏览器上下文中触发（如 Self-XSS），应标记为 **False Positive (CWE-1007)**。
+
+2. **重点检查以下高风险模式**：
+   - 不安全的 `eval()`、`new Function()`、`setTimeout(string)` 等动态代码执行；
+   - Node.js 中不安全的 `child_process.exec()` / `spawn()` 使用，尤其是拼接用户输入；
+   - 原型污染（Prototype Pollution）：通过 `__proto__`、`constructor.prototype` 等修改对象原型；
+   - 未验证/未转义的用户输入直接用于敏感操作（如文件读取、命令执行、数据库查询）。
+
+3. **【关键上下文判断】—— 自动忽略静态资源路径**  
+   - **如果文件路径包含以下任一关键词，请默认其为前端静态资源，倾向于判断为误报，不予深入分析漏洞可利用性（尽量不要用工具读取静态文件的代码，它们往往是上万个字符压缩为1行）**：
+     - `'assets/'`
+     - `'asset/'`
+     - `'static/'`
+     - `'/public/'`
+     - `'dist/'`
+     - `'build/'`
+     - `'vendor/'`
+     - `'node_modules/'`（除非明确是服务端入口）
+   - 此类路径中的 JavaScript 通常为打包后的客户端代码，运行在用户浏览器中。其中的“漏洞”往往等同于用户对自己执行 XSS，**不具备远程攻击价值**。
+   - **优先分析明确属于服务端逻辑的文件**（如 `server.js`、`app.js`、`routes/`、`controllers/`、`api/` 等目录）。
+
+4. **可达性分析（Reachability）**  
+   - 该漏洞代码是否可通过 HTTP 请求、API 调用、WebSocket 等方式由外部触发？
+   - 是否有身份认证、输入过滤、WAF 等中间层阻止攻击载荷到达？
+
+5. **影响评估（Impact）**  
+   - 若可利用，是否导致：
+     - 远程代码执行（RCE）？
+     - 敏感数据泄露（如数据库、环境变量、文件系统）？
+     - 服务拒绝（DoS）？
+     - 权限提升或横向移动？
+   - 若仅影响当前用户会话（如 cookie 窃取但需用户交互），且无传播性，则降级为低危或误报。
