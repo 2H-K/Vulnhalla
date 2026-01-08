@@ -1,0 +1,19 @@
+1. Is this a real security issue that you can exploit?
+
+2. Consider the C# context:
+   - Check if input validation is properly implemented
+   - Verify if parameterized queries are used for database operations
+   - Look for proper type checking and bounds checking
+   - Examine exception handling and error messages
+   - Consider the .NET framework security features in use
+
+3. Analyze the code flow:
+   - Trace user input from source to sink
+   - Identify any sanitization or validation steps
+   - Check for security controls (e.g., [ValidateAntiForgeryToken], [Authorize])
+   - Look for authentication/authorization checks
+
+4. Evaluate the exploitability:
+   - Can an attacker control the tainted data?
+   - Is the vulnerable code reachable from public endpoints?
+   - What are the prerequisites for exploitation?

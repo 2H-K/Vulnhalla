@@ -1,11 +1,32 @@
+/**
+ * @name Java Function Tree Metadata
+ * @description 提取 Java 函数的元数据及其调用者信息。
+ */
+
 import java
 
-string get_caller(Callable c){
-  if exists(Call d | c.getACall() = d)
-  then result = c.getACall().getEnclosingCallable().getLocation().getFile() + ":" + c.getACall().getEnclosingCallable().getLocation().getStartLine()
-  else result = ""
+/**
+ * 获取调用了 c 的调用者的位置标识。
+ */
+string get_callers(Callable c) {
+  if exists(Call call | call.getCallee() = c) // 注意：在某些版本中使用 getCallee() 或 getTarget()
+  then result = concat(Call call | call.getCallee() = c | 
+    call.getEnclosingCallable().getLocation().getFile().getBaseName() + ":" + 
+    call.getEnclosingCallable().getLocation().getStartLine().toString(),
+    "|" 
+  )
+  else result = "NONE"
 }
 
 
+
 from Callable c
-select c.getName() as function_name, c.getLocation().getFile() as file, c.getLocation().getStartLine() as start_line, file + ":" + start_line as function_id, c.getBody().getLocation().getEndLine() as end_line, get_caller(c) as caller_id
+where 
+  c.fromSource() 
+select 
+  c.getQualifiedName() as function_name,
+  c.getLocation().getFile().getAbsolutePath() as file_path,
+  c.getLocation().getStartLine() as start_line,
+  c.getBody().getLocation().getEndLine() as end_line,
+  c.getLocation().getFile().getAbsolutePath() + ":" + c.getLocation().getStartLine().toString() as function_id,
+  get_callers(c) as caller_ids

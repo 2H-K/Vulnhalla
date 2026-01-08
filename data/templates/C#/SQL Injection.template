@@ -1,0 +1,23 @@
+1. Is this a real SQL injection vulnerability that can be exploited?
+
+2. Analyze the SQL query construction:
+   - Does the query use string concatenation or interpolation with user input?
+   - Is the input directly embedded in the SQL statement without sanitization?
+   - Are parameterized queries or stored procedures used instead?
+
+3. Check for security controls:
+   - Are SqlParameter objects used to pass parameters?
+   - Is there input validation before query construction?
+   - Are there ORM frameworks (Entity Framework, Dapper) with proper parameterization?
+   - Look for [ValidateAntiForgeryToken] or similar attributes
+
+4. Evaluate exploitability:
+   - Can an attacker inject malicious SQL through the tainted parameter?
+   - Is the vulnerable endpoint publicly accessible?
+   - What type of SQL injection is possible (UNION-based, blind, error-based)?
+   - Can sensitive data be extracted or data be modified?
+
+5. Consider false positives:
+   - Is the input actually from a trusted source (e.g., configuration, internal service)?
+   - Is there proper type casting that prevents injection?
+   - Are there additional security layers (WAF, input filtering)?

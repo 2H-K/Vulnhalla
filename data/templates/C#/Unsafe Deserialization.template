@@ -1,0 +1,32 @@
+1. Is this a real unsafe deserialization vulnerability that can be exploited?
+
+2. Analyze the deserialization operation:
+   - Which serialization method is being used (BinaryFormatter, JavaScriptSerializer, XmlSerializer, etc.)?
+   - Is the deserialized data coming from an untrusted source (HTTP request, file input, user input)?
+   - Does the application trust the deserialized object without validation?
+
+3. Check for security controls:
+   - Is there input validation before deserialization?
+   - Are safe serializers used (e.g., JSON.NET with TypeNameHandling.None)?
+   - Is there a SerializationBinder to restrict types?
+   - Are there authentication/authorization checks after deserialization?
+   - Look for [ValidateAntiForgeryToken] or similar attributes
+
+4. Evaluate exploitability:
+   - Can an attacker craft malicious serialized data?
+   - Are there dangerous types in the deserialization chain (gadget chains)?
+   - Can remote code execution be achieved through deserialization?
+   - Is the vulnerable endpoint publicly accessible?
+
+5. Consider false positives:
+   - Is the deserialized data from a trusted internal source?
+   - Is the deserializer configured safely (e.g., with type restrictions)?
+   - Is the deserialized object only used in a safe context (e.g., read-only operations)?
+   - Are there additional security layers (input validation, type checking)?
+
+6. Common C# deserialization risks:
+   - BinaryFormatter is inherently unsafe and should be avoided
+   - JavaScriptSerializer without JavaScriptTypeResolver is safer
+   - XmlSerializer with [XmlElement] restrictions is safer
+   - JSON.NET with TypeNameHandling.None is safer
+   - LosFormatter and ObjectStateFormatter are dangerous

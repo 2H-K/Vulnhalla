@@ -5,13 +5,12 @@
 
 import java
 import semmle.code.java.dataflow.FlowSources
-// 1. 确保导入此路径
+// 导入标准 SQL 注入查询库
 import semmle.code.java.security.SqlInjectionQuery
 
-// 2. 关键点：从 SqlInjectionQuery 模块中显式导入 PathGraph
-import SqlInjectionQuery::SqlInjection::PathGraph
+// 使用标准库定义的 QueryInjectionFlow 模块
+import QueryInjectionFlow::PathGraph
 
-// 3. 使用完整的限定名来定义 source 和 sink
-from SqlInjectionQuery::SqlInjection::PathNode source, SqlInjectionQuery::SqlInjection::PathNode sink
-where SqlInjectionQuery::SqlInjection::flowPath(source, sink)
+from QueryInjectionFlow::PathNode source, QueryInjectionFlow::PathNode sink
+where QueryInjectionFlow::flowPath(source, sink)
 select sink.getNode(), source, sink, "This query depends on a $@.", source.getNode(), "user-provided value"

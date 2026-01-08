@@ -38,6 +38,7 @@ from src.utils.common_functions import (
 
 # Script that holds your GPT logic
 from src.llm.llm_analyzer import LLMAnalyzer
+from src.llm.strategies.factory import get_strategy
 from src.utils.config_validator import validate_and_exit_on_error
 from src.utils.logger import get_logger
 from src.utils.exceptions import VulnhallaError, CodeQLError
@@ -86,6 +87,9 @@ class IssueAnalyzer:
         self.code_path: Optional[str] = None
         self.config = config
         self.db_dir = db_dir
+        
+        # Initialize language strategy for token management and language-specific handling
+        self.strategy = get_strategy(lang, config=config)
 
     def is_static_resource(self, file_path: str) -> bool:
         """
@@ -699,20 +703,12 @@ class IssueAnalyzer:
             function_end = int(current_function["end_line"])
             function_lines = code_file_contents[function_start:function_end]
             
-            # 根据语言设置不同的字符限制（确保不超过 LLM 上下文窗口）
-            max_chars_by_lang = {
-                "javascript": 4000,   # JavaScript: 4k chars (更严格，防止压缩文件)
-                "java": 12000,       # Java: 12k chars ≈ 3000 tokens
-                "c": 12000,          # C/C++: 12k chars ≈ 3000 tokens
-                "python": 10000,     # Python: 10k chars
-                "go": 10000,         # Go: 10k chars
-                "default": 10000     # 其他语言: 10k chars ≈ 2500 tokens
-            }
-            max_chars = max_chars_by_lang.get(self.lang, max_chars_by_lang["default"])
+            # 根据语言策略设置字符限制（确保不超过 LLM 上下文窗口）
+            max_chars = self.strategy.code_size_limit
             
             # 对 JavaScript 特别处理：检查是否为压缩/混淆文件
             if self.lang == "javascript":
-                max_function_lines = 100  # 减少行数限制以避免单行大文件
+                max_function_lines = self.strategy.max_function_lines  # 从策略获取行数限制
                 if len(function_lines) > max_function_lines:
                     logger.warning(f"JS function truncated to {max_function_lines} lines")
                     function_lines = function_lines[:max_function_lines]
@@ -749,7 +745,7 @@ class IssueAnalyzer:
             # --- 关键：仅限制 logger.debug 的打印长度，不影响发送给 LLM 的 prompt ---
             logger.info(f"Prompt length: {len(prompt)} characters")
             logger.debug("=== DEBUG PROMPT PREVIEW (Max 2000 chars) ===")
-            logger.debug(prompt[:2000] + ("... [TRUNCATED IN LOG]" if len(prompt) > 2000 else ""))
+            logger.debug(prompt[:1000] + ("... [TRUNCATED IN LOG]" if len(prompt) > 1000 else ""))
             logger.debug("=== END PROMPT PREVIEW ===")
 
             # 打印各组件长度分析
