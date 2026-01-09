@@ -1,0 +1,19 @@
+This code uses Runtime.exec() or ProcessBuilder to execute system commands with user-controlled input.
+
+Key vulnerabilities to check:
+1. Direct concatenation of user input into command strings
+2. Missing input validation or sanitization
+3. Use of shell interpreters (cmd.exe, /bin/sh) with untrusted data
+4. Command injection through environment variables or file paths
+
+Common false positives:
+- Command execution with hardcoded or validated parameters
+- Use of allowlist for allowed commands
+- Input properly escaped or quoted
+- Logging or debugging purposes with safe data
+
+Consider:
+- Can an attacker control the command string or arguments?
+- Is there proper input validation (allowlist, regex)?
+- Are shell metacharacters properly escaped?
+- Is the code path reachable from user input?

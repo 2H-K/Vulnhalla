@@ -1,0 +1,25 @@
+This code uses XML parsing without proper security configuration, potentially vulnerable to XXE attacks.
+
+Key vulnerabilities to check:
+1. XML parsers not configured to disable external entities
+2. DocumentBuilderFactory or SAXParserFactory with insecure settings
+3. Missing setFeature() calls to disable DTD and external entities
+4. Use of vulnerable XML parsers (DOM, SAX, StAX, JAXB)
+
+Common false positives:
+- Parsers properly configured with secure features
+- XML data from trusted sources
+- Use of allowlist for XML content
+- Internal XML processing with no external access
+
+Consider:
+- Is the XML parser configured with secure features?
+- Are external entities (DTD, XInclude) disabled?
+- Can an attacker control XML input?
+- Is the code path reachable from external input?
+- Are there proper input validation and sanitization?
+
+Secure configuration examples:
+- factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+- factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+- factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)

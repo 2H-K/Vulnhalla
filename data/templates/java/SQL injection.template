@@ -1,0 +1,27 @@
+This code constructs SQL queries with user-controlled input, potentially vulnerable to SQL injection.
+
+Key vulnerabilities to check:
+1. String concatenation of user input into SQL statements
+2. Use of Statement instead of PreparedStatement
+3. Missing parameterized queries or proper escaping
+4. Dynamic SQL construction with untrusted data
+
+Common false positives:
+- Input properly validated or sanitized
+- Use of parameterized queries (PreparedStatement)
+- SQL queries with hardcoded values
+- Logging or debugging with safe data
+- Use of ORM frameworks with built-in protection
+
+Consider:
+- Can an attacker control SQL query structure?
+- Is there proper input validation (allowlist, regex)?
+- Are parameterized queries used correctly?
+- Is input properly escaped (if not using prepared statements)?
+- Can the code path be triggered by external input?
+
+Secure patterns:
+- PreparedStatement with setString(), setInt() etc.
+- Use of ORM frameworks (Hibernate, JPA)
+- Stored procedures with parameters
+- Input validation with allowlist

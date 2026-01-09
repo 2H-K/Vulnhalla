@@ -1,0 +1,20 @@
+This code uses file operations with user-controlled paths, potentially allowing path traversal attacks.
+
+Key vulnerabilities to check:
+1. File paths constructed from user input without validation
+2. Missing path normalization or canonicalization
+3. Use of File() or Path operations with untrusted data
+4. Directory traversal sequences (../, ..\, etc.) not filtered
+
+Common false positives:
+- Paths validated against allowlist
+- Use of getCanonicalPath() or getRealPath() for normalization
+- File operations on sandboxed directories
+- Logging or debugging with safe paths
+
+Consider:
+- Can an attacker control file path or filename?
+- Is there proper path validation (allowlist, normalization)?
+- Are traversal sequences properly blocked?
+- Is access restricted to safe directories?
+- Can the code path be triggered by external input?
