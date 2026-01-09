@@ -621,7 +621,7 @@ class IssueAnalyzer:
             issue_id += 1
 
             # Check if it's a static resource - skip LLM analysis
-            if self.is_static_resource(issue["file"]):
+            if self.strategy.should_skip_file(issue["file"]):
                 logger.info(f"Issue {issue_id}: Skipped static resource -> false")
                 false_issues.append(issue_id)
                 continue
@@ -718,14 +718,14 @@ class IssueAnalyzer:
                     logger.warning("Detected minified JavaScript file, applying aggressive truncation")
                     max_chars = 3000  # 对压缩文件使用更严格的限制
             
-            # 优先使用 extract_function_code 方法进行智能截断
+            # 使用策略的 extract_function_code 方法进行智能截断
             function_dict = {
                 "start_line": current_function["start_line"],
                 "end_line": current_function["end_line"]
             }
             
-            function_code = self.extract_function_code(
-                code_file_contents, function_dict, max_chars
+            function_code = self.strategy.extract_function_code(
+                code_file_contents, function_dict
             )
             
             # 严格检查确保截断有效（防止超出 LLM 限制）
@@ -740,19 +740,22 @@ class IssueAnalyzer:
             transform_func = self.create_bracket_reference_replacer(self.db_path, self.code_path)
             message = re.sub(bracket_pattern, transform_func, issue["message"])
 
-            prompt = self.build_prompt_by_template(issue, message, snippet, code)
+            prompt = self.strategy.build_prompt(issue, message, snippet, code)
             
-            # --- 关键：仅限制 logger.debug 的打印长度，不影响发送给 LLM 的 prompt ---
-            logger.info(f"Prompt length: {len(prompt)} characters")
+
+
+            # Token 熔断器硬上限拦截
+            MAX_TOKENS_HARD_LIMIT = 100000  # 硬上限：10万 tokens
+            estimated_tokens = len(prompt) // 4  # 粗略估计：1 token ≈ 4 characters
+            if estimated_tokens > MAX_TOKENS_HARD_LIMIT:
+                logger.error(f"❌ Token 熔断器触发: prompt ({estimated_tokens} tokens) 超过硬上限 {MAX_TOKENS_HARD_LIMIT}")
+                false_issues.append(issue_id)
+                continue
+            
+            logger.info(f"Prompt length: {len(prompt)} characters (~{estimated_tokens} tokens)")
             logger.debug("=== DEBUG PROMPT PREVIEW (Max 2000 chars) ===")
             logger.debug(prompt[:1000] + ("... [TRUNCATED IN LOG]" if len(prompt) > 1000 else ""))
             logger.debug("=== END PROMPT PREVIEW ===")
-
-            # 打印各组件长度分析
-            file_name = PurePosixPath(issue["file"]).name
-            location = f"look at {file_name}:{int(issue['start_line'])} with '{snippet}'"
-            parts = {'name': len(issue['name']), 'message': len(message), 'location': len(location), 'code': len(code)}
-            logger.debug(f"Parts length: {parts}")
 
             # 发送请求
             try:

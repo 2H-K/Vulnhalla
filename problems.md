@@ -16,8 +16,6 @@
 * **Go 策略**：保持中等 `code_size_limit`，侧重于处理 Goroutine 并发安全和 SQL 注入。
 * **Python 策略**：关注装饰器和缩进完整性，防止截断导致语法错误）。
 
-
-
 ---
 
 ### 二、 实施阶段划分
@@ -54,24 +52,22 @@
 
 ### 四、 下一步行动建议
 
-#### 已完成 ✅
-
 - [x] 创建 `src/llm/strategies/` 目录结构
 - [x] 创建策略基类 `base.py`
 - [x] 创建语言配置中心 `language_config.py`
 - [x] 创建策略工厂 `factory.py`
 - [x] 在 `vulnhalla.py` 中集成策略模式（最小改动）
 - [x] 创建默认策略 `default_strategy.py`
+- [x] 创建 C++ 策略
+- [x] 创建 Java 策略（高 class_size_limit）
+- [x] 创建 JavaScript 策略（beautifier 集成）
+- [x] 创建 Python 策略（装饰器完整性）
+- [x] 创建 Go 策略（并发安全）
+- [x] 创建 C# 策略（.NET 反序列化）
 
-#### 待完成
+**待完成任务：**
 
-- [ ] 创建具体语言策略（C++, JavaScript 等）
-- [ ] 使用策略的 `should_skip_file()` 替换硬编码的 `is_static_resource()`
-- [ ] 使用策略的 `extract_function_code()` 替换现有逻辑
-- [ ] 使用策略的 `build_prompt()` 替换现有模板构建
-- [ ] 集成 JS beautifier 到 JavaScript 策略
-- [ ] 添加 Token 熔断器硬上限拦截
-- [ ] 创建 Java 策略（高 class_size_limit）
-- [ ] 创建 Python 策略（装饰器完整性）
-- [ ] 创建 Go 策略（并发安全）
-- [ ] 创建 C# 策略（.NET 反序列化）
+- [x] 使用策略的 `should_skip_file()` 替换硬编码的 `is_static_resource()`
+- [x] 使用策略的 `extract_function_code()` 替换现有逻辑
+- [x] 使用策略的 `build_prompt()` 替换现有模板构建
+- [x] 添加 Token 熔断器硬上限拦截
