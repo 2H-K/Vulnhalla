@@ -18,9 +18,9 @@ import litellm
 from src.utils.llm_config import load_llm_config, get_model_name
 from src.utils.config_validator import validate_llm_config_dict
 from src.utils.logger import get_logger
-from src.utils.common_functions import read_file_lines_from_zip
-from src.utils.exceptions import CodeQLError, LLMApiError, LLMConfigError
+from src.utils.exceptions import LLMApiError, LLMConfigError
 from src.utils.cache_manager import CacheManager
+from src.codeql.db_lookup import CodeQLDBLookup
 
 logger = get_logger(__name__)
 
@@ -35,22 +35,28 @@ class LLMAnalyzer:
     def __init__(self, cache_enabled: Optional[bool] = None, cache_dir: Optional[str] = None) -> None:
         """
         Initialize a LLMAnalyzer instance and define tools and system messages.
-        
+
         Args:
             cache_enabled: Whether to enable caching. If None, reads from config.
             cache_dir: Custom cache directory. If None, uses default.
         """
         self.config: Optional[Dict[str, Any]] = None
         self.model: Optional[str] = None
-        
-        # Initialize cache manager
+
+        # Initialize CodeQL database lookup with caching support
+        self.db_lookup = CodeQLDBLookup(
+            cache_enabled=cache_enabled,
+            cache_dir=cache_dir
+        )
+
+        # Initialize cache manager for LLM responses
         if cache_enabled is None:
             # Load from config if not specified
             from src.utils.llm_config import load_llm_config
             temp_config = load_llm_config()
             cache_enabled = temp_config.get("cache_enabled", True)
             cache_dir = temp_config.get("cache_dir", "output/cache")
-        
+
         self.cache_manager = CacheManager(
             cache_dir=cache_dir or "output/cache",
             enabled=cache_enabled
@@ -198,10 +204,10 @@ class LLMAnalyzer:
     def init_llm_client(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
         Initialize the LLM configuration for LiteLLM.
-        
+
         Args:
             config (Dict, optional): Full configuration dictionary. If not provided, loads from .env file.
-        
+
         Raises:
             LLMConfigError: If configuration is invalid or cannot be loaded.
         """
@@ -217,7 +223,7 @@ class LLMAnalyzer:
                 logger.info(f"Using model: {self.model}")
                 self.setup_litellm_env()
                 return
-            
+
             # Load from .env file
             config = load_llm_config()
             validate_llm_config_dict(config)
@@ -232,7 +238,7 @@ class LLMAnalyzer:
         except Exception as e:
             # Other errors (e.g., from load_llm_config) should also be LLMConfigError
             raise LLMConfigError(f"Failed to initialize LLM client: {e}") from e
-    
+
     def setup_litellm_env(self) -> None:
         """
         Set up environment variables for LiteLLM based on config.
@@ -240,10 +246,10 @@ class LLMAnalyzer:
         """
         if not self.config:
             return
-        
+
         provider = self.config.get("provider", "openai")
         api_key = self.config.get("api_key")
-        
+
         # Mapping table for providers that only need API key set
         API_KEY_ENV_VARS = {
             "openai": "OPENAI_API_KEY",
@@ -258,7 +264,7 @@ class LLMAnalyzer:
             "deepseek": "DEEPSEEK_API_KEY",
             "zai": "ZAI_API_KEY",
         }
-        
+
         # Handle providers with simple API key mapping
         if provider in API_KEY_ENV_VARS:
             if api_key:
@@ -266,7 +272,7 @@ class LLMAnalyzer:
                 # Cohere also sets CO_API_KEY for compatibility
                 if provider == "cohere":
                     os.environ["CO_API_KEY"] = api_key
-        
+
         # Handle Azure (requires endpoint and api_version)
         elif provider == "azure":
             if api_key:
@@ -275,7 +281,7 @@ class LLMAnalyzer:
                 os.environ["AZURE_API_BASE"] = self.config["endpoint"]
             if self.config.get("api_version"):
                 os.environ["AZURE_API_VERSION"] = self.config["api_version"]
-        
+
         # Handle Bedrock (uses AWS credentials)
         elif provider == "bedrock":
             if api_key:
@@ -284,7 +290,7 @@ class LLMAnalyzer:
                 os.environ["AWS_SECRET_ACCESS_KEY"] = self.config["aws_secret_access_key"]
             if self.config.get("endpoint"):  # Endpoint contains AWS region
                 os.environ["AWS_REGION_NAME"] = self.config["endpoint"]
-        
+
         # Handle Vertex AI (uses GCP credentials)
         elif provider == "vertex_ai":
             if self.config.get("gcp_project_id"):
@@ -292,425 +298,18 @@ class LLMAnalyzer:
             if self.config.get("gcp_location"):
                 os.environ["GCP_LOCATION"] = self.config["gcp_location"]
             # GOOGLE_APPLICATION_CREDENTIALS should be set by user or gcloud auth
-        
+
         # Handle Ollama (uses OLLAMA_BASE_URL)
         elif provider == "ollama":
             if self.config.get("endpoint"):
                 os.environ["OLLAMA_BASE_URL"] = self.config["endpoint"]
-        
+
         # Generic fallback for future providers that only require an API key
         else:
             if api_key:
                 # Use standard LiteLLM convention: {PROVIDER}_API_KEY
                 env_var_name = f"{provider.upper()}_API_KEY"
                 os.environ[env_var_name] = api_key
-
-    def get_function_by_line(
-        self,
-        function_tree_file: str,
-        file: str,
-        line: int
-    ) -> Optional[Dict[str, str]]:
-        """
-        Retrieve the function dictionary from a CSV (FunctionTree.csv) that matches
-        the specified file and line coverage.
-        
-        Args:
-            function_tree_file (str): Path to the FunctionTree.csv file.
-            file (str): Name of the file as it appears in the CSV row.
-            line (int): A line number within the function's start_line and end_line range.
-        
-        Returns:
-            Optional[Dict[str, str]]: The matching function row as a dict, or None if not found.
-        
-        Raises:
-            CodeQLError: If function tree file cannot be read (not found, permission denied, etc.).
-        """
-        # DEBUG: Log entry parameters
-        logger.debug(f"get_function_by_line called with file={file}, line={line}")
-        
-        keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
-        
-        # Initialize tracking variables for greedy selection
-        self.smallest_range = float('inf')
-        self.best_function = None
-        
-        try:
-            with Path(function_tree_file).open("r", encoding="utf-8") as f:
-                while True:
-                    function = f.readline()
-                    if not function:
-                        break
-                    if file in function:
-                        row = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', function)
-                        if len(row) != len(keys):
-                            logger.debug(f"Skipping malformed row: {len(row)} columns vs {len(keys)} expected")
-                            continue  # Skip malformed rows
-
-                        # FIXED: Use row_dict instead of function to avoid confusion
-                        row_dict = dict(zip(keys, row))
-                        logger.debug(f"Parsed row_dict: {row_dict}")
-                        
-                        if row_dict and row_dict["start_line"] and row_dict["end_line"]:
-                            start = int(row_dict["start_line"])
-                            end = int(row_dict["end_line"])
-                            logger.debug(f"Checking line range: start={start}, end={end}, target_line={line}")
-                            
-                            if start <= line <= end:
-                                if file in row_dict["file"]:
-                                    # Greedy selection: track the function with smallest range
-                                    # (most specific/nested function containing the line)
-                                    size = end - start
-                                    logger.debug(f"Found matching function with size={size}, current smallest={self.smallest_range}")
-                                    if size < self.smallest_range:
-                                        self.smallest_range = size
-                                        self.best_function = row_dict
-                                        logger.debug(f"Updated best_function: {self.best_function}")
-        except FileNotFoundError as e:
-            raise CodeQLError(f"Function tree file not found: {function_tree_file}") from e
-        except PermissionError as e:
-            raise CodeQLError(f"Permission denied reading function tree file: {function_tree_file}") from e
-        except OSError as e:
-            raise CodeQLError(f"OS error while reading function tree file: {function_tree_file}") from e
-
-        return self.best_function
-
-    def get_function_by_name(
-        self,
-        function_tree_file: str,
-        function_name: str,
-        all_function: List[Dict[str, Any]],
-        less_strict: bool = False
-    ) -> Tuple[Union[str, Dict[str, str]], Optional[Dict[str, str]]]:
-        """
-        Retrieve a function by searching function_name in FunctionTree.csv.
-        If not found, tries partial match if less_strict is True.
-        
-        Args:
-            function_tree_file (str): Path to the FunctionTree.csv.
-            function_name (str): Desired function name (e.g., 'MyClass::MyFunc').
-            all_function (List[Dict[str, Any]]): A list of known function dictionaries.
-            less_strict (bool, optional): If True, use partial matching. Defaults to False.
-        
-        Returns:
-            Tuple[Union[str, Dict[str, str]], Optional[Dict[str, str]]]:
-                - The found function (dict) or an error message (str).
-                - The "parent function" that references it, if relevant.
-        
-        Raises:
-            CodeQLError: If function tree file cannot be read (not found, permission denied, etc.).
-        """
-        keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
-        function_name_only = function_name.split("::")[-1]
-        
-        for current_function in all_function:
-            try:
-                with Path(function_tree_file).open("r", encoding="utf-8") as f:
-                    while True:
-                        row = f.readline()
-                        if not row:
-                            break
-                        if current_function["function_id"] in row:
-                            row_split = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', row)
-                            row_dict = dict(zip(keys, row_split))
-                            if not row_dict:
-                                continue
-
-                            candidate_name = row_dict["function_name"].replace("\"", "")
-                            if (candidate_name == function_name_only
-                                    or (less_strict and function_name_only in candidate_name)):
-                                return row_dict, current_function
-            except FileNotFoundError as e:
-                raise CodeQLError(f"Function tree file not found: {function_tree_file}") from e
-            except PermissionError as e:
-                raise CodeQLError(f"Permission denied reading function tree file: {function_tree_file}") from e
-            except OSError as e:
-                raise CodeQLError(f"OS error while reading function tree file: {function_tree_file}") from e
-
-        # Try partial matching if less_strict is False
-        if not less_strict:
-            return self.get_function_by_name(function_tree_file, function_name, all_function, True)
-        else:
-            err = (
-                f"Function '{function_name}' not found. Make sure you're using "
-                "the correct tool and args."
-            )
-            return err, None
-
-    def get_macro(
-        self,
-        curr_db: str,
-        macro_name: str,
-        less_strict: bool = False
-    ) -> Union[str, Dict[str, str]]:
-        """
-        Return macro info from Macros.csv for the given macro_name.
-        If not found, tries partial match if less_strict is True.
-        
-        Args:
-            curr_db (str): Path to the current CodeQL database folder.
-            macro_name (str): Macro name to search for.
-            less_strict (bool, optional): If True, use partial matching.
-        
-        Returns:
-            Union[str, Dict[str, str]]:
-                - A dict with 'macro_name' and 'body' if found,
-                - or an error message string if not found.
-        
-        Raises:
-            CodeQLError: If Macros CSV file cannot be read (not found, permission denied, etc.).
-        """
-        macro_file = Path(curr_db) / "Macros.csv"
-        keys = ["macro_name", "body"]
-        
-        try:
-            with macro_file.open("r", encoding='utf-8') as f:
-                while True:
-                    macro = f.readline()
-                    if not macro:
-                        break
-                    if macro_name in macro:
-                        row = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', macro)
-                        row_dict = dict(zip(keys, row))
-                        if not row_dict:
-                            continue
-
-                        actual_name = row_dict["macro_name"].replace("\"", "")
-                        if (actual_name == macro_name
-                                or (less_strict and macro_name in actual_name)):
-                            return row_dict
-        except FileNotFoundError as e:
-            raise CodeQLError(f"Macros CSV file not found: {macro_file}") from e
-        except PermissionError as e:
-            raise CodeQLError(f"Permission denied reading Macros CSV: {macro_file}") from e
-        except OSError as e:
-            raise CodeQLError(f"OS error while reading Macros CSV: {macro_file}") from e
-
-        if not less_strict:
-            return self.get_macro(curr_db, macro_name, True)
-        else:
-            return (
-                f"Macro '{macro_name}' not found. Make sure you're using the correct tool "
-                "with correct args."
-            )
-
-    def get_global_var(
-        self,
-        curr_db: str,
-        global_var_name: str,
-        less_strict: bool = False
-    ) -> Union[str, Dict[str, str]]:
-        """
-        Return a global variable from GlobalVars.csv matching global_var_name.
-        If not found, tries partial match if less_strict is True.
-        
-        Args:
-            curr_db (str): Path to the current CodeQL database folder.
-            global_var_name (str): The name of the global variable to find.
-            less_strict (bool, optional): If True, use partial matching.
-        
-        Returns:
-            Union[str, Dict[str, str]]:
-                - A dict with ['global_var_name','file','start_line','end_line'] if found,
-                - or an error message string if not found.
-        
-        Raises:
-            CodeQLError: If GlobalVars CSV file cannot be read (not found, permission denied, etc.).
-        """
-        global_var_file = Path(curr_db) / "GlobalVars.csv"
-        keys = ["global_var_name", "file", "start_line", "end_line"]
-        var_name_only = global_var_name.split("::")[-1]
-        
-        try:
-            with global_var_file.open("r", encoding="utf-8") as f:
-                while True:
-                    line = f.readline()
-                    if not line:
-                        break
-                    if var_name_only in line:
-                        data = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', line)
-                        data_dict = dict(zip(keys, data))
-                        if not data_dict:
-                            continue
-
-                        actual_name = data_dict["global_var_name"].replace("\"", "")
-                        if (actual_name == var_name_only
-                                or (less_strict and var_name_only in actual_name)):
-                            return data_dict
-        except FileNotFoundError as e:
-            raise CodeQLError(f"GlobalVars CSV file not found: {global_var_file}") from e
-        except PermissionError as e:
-            raise CodeQLError(f"Permission denied reading GlobalVars CSV: {global_var_file}") from e
-        except OSError as e:
-            raise CodeQLError(f"OS error while reading GlobalVars CSV: {global_var_file}") from e
-
-        if not less_strict:
-            return self.get_global_var(curr_db, global_var_name, True)
-        else:
-            return (
-                f"Global var '{global_var_name}' not found. "
-                "Could it be a macro or should you use another tool?"
-            )
-
-    def get_class(
-        self,
-        curr_db: str,
-        class_name: str,
-        less_strict: bool = False
-    ) -> Union[str, Dict[str, str]]:
-        """
-        Return class info (type, class_name, file, start_line, end_line, simple_name)
-        from Classes.csv for class_name. If not found, tries partial match if less_strict is True.
-        
-        Args:
-            curr_db (str): Path to the current CodeQL database folder.
-            class_name (str): The name of the class/struct/union to find.
-            less_strict (bool, optional): If True, use partial matching.
-        
-        Returns:
-            Union[str, Dict[str, str]]:
-                - A dict with keys ['type','class_name','file','start_line','end_line','simple_name']
-                - or an error message string if not found.
-        
-        Raises:
-            CodeQLError: If Classes CSV file cannot be read (not found, permission denied, etc.).
-        """
-        classes_file = Path(curr_db) / "Classes.csv"
-        keys = ["type", "class_name", "file", "start_line", "end_line", "simple_name"]
-        class_name_only = class_name.split("::")[-1]
-        
-        try:
-            with classes_file.open("r", encoding="utf-8") as f:
-                while True:
-                    row = f.readline()
-                    if not row:
-                        break
-                    if class_name_only in row:
-                        row_split = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', row)
-                        row_dict = dict(zip(keys, row_split))
-                        if not row_dict:
-                            continue
-
-                        actual_class = row_dict["class_name"].replace("\"", "")
-                        simple_class = row_dict["simple_name"].replace("\"", "")
-                        if (
-                            actual_class == class_name_only
-                            or simple_class == class_name_only
-                            or (less_strict and class_name_only in actual_class)
-                        ):
-                            return row_dict
-        except FileNotFoundError as e:
-            raise CodeQLError(f"Classes CSV file not found: {classes_file}") from e
-        except PermissionError as e:
-            raise CodeQLError(f"Permission denied reading Classes CSV: {classes_file}") from e
-        except OSError as e:
-            raise CodeQLError(f"OS error while reading Classes CSV: {classes_file}") from e
-
-        if not less_strict:
-            return self.get_class(curr_db, class_name, True)
-        else:
-            return f"Class '{class_name}' not found. Could it be a Namespace?"
-
-    def get_caller_function(
-        self,
-        function_tree_file: str,
-        current_function: Dict[str, str]
-    ) -> Union[str, Dict[str, str]]:
-        """
-        Return the caller function from function_tree_file that calls current_function.
-        
-        Args:
-            function_tree_file (str): Path to the FunctionTree.csv.
-            current_function (Dict[str, str]): The function dictionary whose caller we want.
-        
-        Returns:
-            Union[str, Dict[str, str]]:
-                - Dict describing the caller if found
-                - or an error string if the caller wasn't found.
-        
-        Raises:
-            CodeQLError: If function tree file cannot be read (not found, permission denied, etc.).
-        """
-        keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
-        caller_id = current_function["caller_id"].replace("\"", "").strip()
-        
-        try:
-            with Path(function_tree_file).open("r", encoding="utf-8") as f:
-                while True:
-                    line = f.readline()
-                    if not line:
-                        break
-                    if caller_id in line:
-                        data = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', line)
-                        data_dict = dict(zip(keys, data))
-                        if not data_dict:
-                            continue
-
-                        if data_dict["function_id"].replace("\"", "").strip() == caller_id:
-                            return data_dict
-        except FileNotFoundError as e:
-            raise CodeQLError(f"Function tree file not found: {function_tree_file}") from e
-        except PermissionError as e:
-            raise CodeQLError(f"Permission denied reading function tree file: {function_tree_file}") from e
-        except OSError as e:
-            raise CodeQLError(f"OS error while reading function tree file: {function_tree_file}") from e
-
-        # Fallback if 'caller_id' is in format file:line
-        maybe_line = caller_id.split(":")
-        if len(maybe_line) == 2:
-            file_part, line_part = maybe_line
-            function = self.get_function_by_line(function_tree_file, file_part[1:], int(line_part))
-            if function:
-                return function
-
-        return (
-            "Caller function was not found. "
-            "Make sure you are using the correct tool with the correct args."
-        )
-
-    def extract_function_from_file(
-        self,
-        db_path: str,
-        current_function: Union[str, Dict[str, str]],
-        max_chars: int = 20000
-    ) -> str:
-        """
-        Return the snippet of code for the given current_function from the archived src.zip.
-
-        Args:
-            db_path (str): Path to the CodeQL database directory.
-            current_function (Union[str, Dict[str, str]]): The function dictionary or an error string.
-            max_chars (int): Maximum characters to return. Defaults to 20000.
-
-        Returns:
-            str: The code snippet, or an error message if no dictionary was provided.
-
-        Raises:
-            CodeQLError: If ZIP file cannot be read or file not found in archive.
-                This exception is raised by `read_file_lines_from_zip()` and propagated here.
-        """
-        if not isinstance(current_function, dict):
-            return str(current_function)
-
-        src_zip = Path(db_path) / "src.zip"
-        file_path = current_function["file"].replace("\"", "")[1:]
-        code_file = read_file_lines_from_zip(str(src_zip), file_path)
-        lines = code_file.split("\n")
-
-        start_line = int(current_function["start_line"])
-        end_line = int(current_function["end_line"])
-        snippet_lines = lines[start_line - 1:end_line]
-
-        snippet = "\n".join(
-            f"{start_line - 1 + i}: {text}" for i, text in enumerate(snippet_lines)
-        )
-
-        # Token fuse: Truncate if too long
-        if len(snippet) > max_chars:
-            snippet = snippet[:max_chars] + "\n... (truncated due to length limits)"
-            logger.warning(f"Function code truncated to {max_chars} chars for {file_path}")
-
-        return f"file: {file_path}\n{snippet}"
 
     def map_func_args_by_llm(
         self,
@@ -720,14 +319,14 @@ class LLMAnalyzer:
         """
         Query the LLM to check how the caller's variables map to the callee's parameters.
         For example, used for analyzing function call relationships.
-        
+
         Args:
             caller (str): The code snippet of the caller function.
             callee (str): The code snippet of the callee function.
-        
+
         Returns:
             Dict[str, Any]: The LLM response object from `self.client`.
-        
+
         Raises:
             LLMApiError: If LLM API call fails (rate limits, timeouts, auth failures, etc.).
         """
@@ -744,7 +343,7 @@ class LLMAnalyzer:
 
         # Use the main model from config
         model_name = self.model if self.model else "gpt-4o"
-        
+
         try:
             response = litellm.completion(
                 model=model_name,
@@ -778,7 +377,7 @@ class LLMAnalyzer:
         Main loop to keep querying the LLM with MESSAGES context plus
         any new system instructions or tool calls, until a final answer with
         a recognized status code is reached or we exhaust a tool-call limit.
-        
+
         Args:
             prompt (str): The user prompt for the LLM to process.
             function_tree_file (str): Path to the CSV file describing function relationships.
@@ -788,12 +387,12 @@ class LLMAnalyzer:
             temperature (float, optional): Sampling temperature. Defaults to 0.2.
             top_p (float, optional): Nucleus sampling. Defaults to 0.2.
             use_cache (bool, optional): Whether to use cache. Defaults to True.
-        
+
         Returns:
             Tuple[List[Dict[str, Any]], str]:
                 - The final conversation messages,
                 - The final content from the LLM's last message.
-        
+
         Raises:
             RuntimeError: If LLM model not initialized.
             LLMApiError: If LLM API call fails (rate limits, timeouts, auth failures, etc.).
@@ -801,18 +400,18 @@ class LLMAnalyzer:
         """
         if not self.model:
             raise RuntimeError("LLM model not initialized. Call init_llm_client() first.")
-        
+
         got_answer = False
         db_path_clean = db_path.replace(" ", "")
         all_functions = functions
-        
+
         messages: List[Dict[str, Any]] = self.MESSAGES[:]
         messages.append({"role": "user", "content": prompt})
-        
+
         # Log initial message stats for debugging
         total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
         logger.info(f"  💬 Initial messages: {len(messages)} messages, ~{total_chars} chars")
-        
+
         # 🔍 DEBUG: 打印消息详细内容
         logger.debug(f"=== DEBUG LLM MESSAGES ===")
         for i, msg in enumerate(messages):
@@ -823,14 +422,14 @@ class LLMAnalyzer:
             else:
                 logger.debug(f"  Content: {content}")
         logger.debug(f"=== END DEBUG MESSAGES ===")
-        
+
         # Additional safety check for context window limits
         # Rough estimation: 1 token ≈ 4 characters for most models
         estimated_tokens = total_chars // 4
         if estimated_tokens > 120000:  # Conservative limit below model's 131072 token limit
             logger.warning(f"Context window may be too large: ~{estimated_tokens} estimated tokens")
             # For very long prompts, we could implement chunking or summarization here
-        
+
         # Check cache first
         if use_cache and self.cache_manager.enabled:
             cached_response = self.cache_manager.get(prompt, self.model)
@@ -838,10 +437,10 @@ class LLMAnalyzer:
                 logger.info(f"✅ Cache HIT for model {self.model}")
                 # Return cached response as a single message
                 return [{"role": "assistant", "content": cached_response}], cached_response
-        
+
         amount_of_tools = 0
         final_content = ""
-        
+
         while not got_answer:
             # Send current messages + tools to LLM endpoint
             try:
@@ -877,11 +476,11 @@ class LLMAnalyzer:
 
             final_content = content_obj.content or ""
             tool_calls = content_obj.tool_calls
-            
+
             # Log message stats after each LLM response
             total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
             logger.info(f"  🔄 LLM response #{amount_of_tools + 1}: {len(messages)} messages, ~{total_chars} chars")
-            
+
             # 🔍 DEBUG: 如果消息变得很大，显示详细信息
             if total_chars > 500000:
                 logger.debug(f"=== LARGE MESSAGE DEBUG ===")
@@ -921,7 +520,7 @@ class LLMAnalyzer:
 
                     # Evaluate which tool to call
                     if tool_function_name == 'get_function_code' and "function_name" in tool_args:
-                        child_function, parent_function = self.get_function_by_name(
+                        child_function, parent_function = self.db_lookup.get_function_by_name(
                             function_tree_file, tool_args["function_name"], all_functions
                         )
                         if isinstance(child_function, dict):
@@ -938,7 +537,7 @@ class LLMAnalyzer:
                             })
 
                     elif tool_function_name == 'get_caller_function':
-                        caller_function = self.get_caller_function(function_tree_file, current_function)
+                        caller_function = self.db_lookup.get_caller_function(function_tree_file, current_function)
                         response_msg = str(caller_function)
 
                         if isinstance(caller_function, dict):
@@ -959,14 +558,14 @@ class LLMAnalyzer:
                             current_function = caller_function
 
                     elif tool_function_name == 'get_macro' and "macro_name" in tool_args:
-                        macro = self.get_macro(db_path_clean, tool_args["macro_name"])
+                        macro = self.db_lookup.get_macro(db_path_clean, tool_args["macro_name"])
                         if isinstance(macro, dict):
                             response_msg = macro["body"]
                         else:
                             response_msg = macro
 
                     elif tool_function_name == 'get_global_var' and "global_var_name" in tool_args:
-                        global_var = self.get_global_var(db_path_clean, tool_args["global_var_name"])
+                        global_var = self.db_lookup.get_global_var(db_path_clean, tool_args["global_var_name"])
                         if isinstance(global_var, dict):
                             global_var_code = self.extract_function_from_file(db_path_clean, global_var, max_chars=20000)
                             response_msg = global_var_code
@@ -974,7 +573,7 @@ class LLMAnalyzer:
                             response_msg = global_var
 
                     elif tool_function_name == 'get_class' and "object_name" in tool_args:
-                        curr_class = self.get_class(db_path_clean, tool_args["object_name"])
+                        curr_class = self.db_lookup.get_class(db_path_clean, tool_args["object_name"])
                         if isinstance(curr_class, dict):
                             class_code = self.extract_function_from_file(db_path_clean, curr_class, max_chars=20000)
                             response_msg = class_code
@@ -1001,7 +600,7 @@ class LLMAnalyzer:
                         "role": "system",
                         "content": (
                             "You called too many tools! If you still can't give a clear answer, "
-                            "return the 'more data' status."
+                            "return a 'more data' status."
                         )
                     })
 
@@ -1011,22 +610,56 @@ class LLMAnalyzer:
 
         return messages, final_content
 
+    def extract_function_from_file(
+        self,
+        db_path: str,
+        current_function: Union[str, Dict[str, str]],
+        max_chars: int = 20000
+    ) -> str:
+        """
+        Return a snippet of code for the given current_function from the archived src.zip.
+
+        Args:
+            db_path (str): Path to the CodeQL database directory.
+            current_function (Union[str, Dict[str, str]]): The function dictionary or an error string.
+            max_chars (int): Maximum characters to return. Defaults to 20000.
+
+        Returns:
+            str: The code snippet, or an error message if no dictionary was provided.
+
+        Raises:
+            CodeQLError: If ZIP file cannot be read or file not found in archive.
+                This exception is raised by `read_file_lines_from_zip()` and propagated here.
+        """
+        if not isinstance(current_function, dict):
+            return str(current_function)
+
+        # Use db_lookup to extract function lines
+        file_path, start_line, end_line, lines = self.db_lookup.extract_function_lines_from_db(
+            db_path, current_function, max_chars=max_chars
+        )
+
+        snippet_lines = lines[start_line - 1:end_line]
+        snippet = self.db_lookup.format_numbered_snippet(file_path, start_line, snippet_lines, max_chars=max_chars)
+
+        return snippet
+
     def clear_cache(self, older_than_days: int = 30) -> int:
         """
         Clear cache entries older than specified days.
-        
+
         Args:
             older_than_days: Delete entries older than this many days. Defaults to 30.
-        
+
         Returns:
             Number of entries deleted.
         """
         return self.cache_manager.clear(older_than_days)
-    
+
     def get_cache_stats(self) -> Dict[str, Any]:
         """
         Get cache statistics.
-        
+
         Returns:
             Dictionary with cache statistics (total_entries, hit_rate, etc.).
         """

@@ -134,7 +134,7 @@ class JavaScriptStrategy(BaseStrategy):
             return ""
         
         # Check if function is too long (minified file)
-        max_lines = self.strategy.max_function_lines
+        max_lines = self.max_function_lines
         if len(snippet_lines) > max_lines:
             logger.warning(f"JS function truncated to {max_lines} lines")
             snippet_lines = snippet_lines[:max_lines]

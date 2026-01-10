@@ -34,18 +34,18 @@ logger=get_logger(__name__)
 # Import all concrete strategies (lazy loading to avoid circular imports)
 # These will be imported only when needed
 _STRATEGY_IMPORTS: Dict[str, str] = {
-    "c": "src.llm.strategies.cpp_strategy",
-    "cpp": "src.llm.strategies.cpp_strategy",
-    "java": "src.llm.strategies.java_strategy",
-    "javascript": "src.llm.strategies.javascript_strategy",
-    "js": "src.llm.strategies.javascript_strategy",
-    "typescript": "src.llm.strategies.typescript_strategy",
-    "ts": "src.llm.strategies.typescript_strategy",
-    "python": "src.llm.strategies.python_strategy",
-    "py": "src.llm.strategies.python_strategy",
-    "go": "src.llm.strategies.go_strategy",
-    "csharp": "src.llm.strategies.csharp_strategy",
-    "c#": "src.llm.strategies.csharp_strategy",
+    "c": "src.llm.strategies.cpp_strategy.CppStrategy",
+    "cpp": "src.llm.strategies.cpp_strategy.CppStrategy",
+    "java": "src.llm.strategies.java_strategy.JavaStrategy",
+    "javascript": "src.llm.strategies.javascript_strategy.JavaScriptStrategy",
+    "js": "src.llm.strategies.javascript_strategy.JavaScriptStrategy",
+    "typescript": "src.llm.strategies.default_strategy.DefaultStrategy",
+    "ts": "src.llm.strategies.default_strategy.DefaultStrategy",
+    "python": "src.llm.strategies.default_strategy.DefaultStrategy",
+    "py": "src.llm.strategies.default_strategy.DefaultStrategy",
+    "go": "src.llm.strategies.go_strategy.GoStrategy",
+    "csharp": "src.llm.strategies.csharp_strategy.CsharpStrategy",
+    "c#": "src.llm.strategies.csharp_strategy.CsharpStrategy",
 }
 
 # Default strategy class for unsupported languages

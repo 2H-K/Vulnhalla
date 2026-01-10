@@ -189,13 +189,14 @@ class IssueAnalyzer:
         Finds the most specific (smallest) function containing the given file and line number.
 
         Algorithm:
-            - Iterate rows where file_path substring appears
-            - Keep rows where start_line <= line <= end_line and file_path in function["file"]
+            - Extract relative path from file_path (remove drive letter and prefix)
+            - Iterate rows where relative path appears
+            - Keep rows where start_line <= line <= end_line and relative path in function["file"]
             - Return function with smallest (end_line - start_line), else None
 
         Args:
             function_tree_file (str): Path to the 'FunctionTree.csv' file.
-            file_path (str): File path substring to match (uses substring containment).
+            file_path (str): File path to match. Can be full path or relative path.
             line (int): The line number to check within function range.
 
         Returns:
@@ -208,36 +209,91 @@ class IssueAnalyzer:
         best_function = None
         smallest_range = float('inf')
 
+        # Extract relative path from the input file_path
+        # Handle both full paths (F:/Code_Audit/...) and relative paths (/fastbee-common/...)
+        # Normalize to remove drive letter and extract the meaningful part
+        relative_path = file_path
+        
+        # If path starts with drive letter, extract the part after the source prefix
+        if ":" in file_path:
+            # Split on :/ to get the part after drive letter
+            parts = file_path.split(":/")
+            if len(parts) > 1:
+                # Try to find the actual file name part
+                # Typically: F:/Code_Audit/fastbee/springboot/fastbee-common/...
+                # We want: fastbee-common/... or just the file name
+                path_parts = parts[1].split("/")
+                # Find the module name (like fastbee-common, fastbee-framework, etc.)
+                for i, part in enumerate(path_parts):
+                    if part and not part.startswith("Code_Audit") and not part.startswith("springboot"):
+                        # Found the module name, use from here
+                        relative_path = "/".join(path_parts[i:])
+                        break
+        elif file_path.startswith("/"):
+            # Already a relative path, just use it
+            relative_path = file_path
+
+        # Also extract just the filename as a fallback
+        filename = Path(file_path).name
+
+        logger.debug(f"find_function_by_line: file_path={file_path}, relative_path={relative_path}, filename={filename}, line={line}")
+
         try:
             with Path(function_tree_file).open("r", encoding="utf-8") as f:
                 for row in f:
-                    if file_path in row:
-                        fields = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', row.strip())
-                        if len(fields) != len(keys):
-                            continue  # Skip malformed rows
+                    # Try multiple matching strategies
+                    match_found = False
+                    if relative_path in row:
+                        match_found = True
+                    elif filename in row:
+                        match_found = True
+                    
+                    if not match_found:
+                        continue
 
-                        function = dict(zip(keys, fields))
-                        try:
-                            start_line = int(function["start_line"])
-                            end_line = int(function["end_line"])
-                        except ValueError:
-                            continue  # Skip if lines aren't integers
+                    fields = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', row.strip())
+                    if len(fields) != len(keys):
+                        continue  # Skip malformed rows
 
-                        # Check if the target line falls within this function's range
-                        if start_line <= line <= end_line:
-                            if file_path in function["file"]:
-                                # Greedy selection: track the function with smallest range
-                                # (most specific/nested function containing the line)
-                                size = end_line - start_line
-                                if size < smallest_range:
-                                    best_function = function
-                                    smallest_range = size
+                    function = dict(zip(keys, fields))
+                    try:
+                        start_line = int(function["start_line"])
+                        end_line = int(function["end_line"])
+                    except ValueError:
+                        continue  # Skip if lines aren't integers
+
+                    # Check if the target line falls within this function's range
+                    if start_line <= line <= end_line:
+                        # Check path match with multiple strategies
+                        function_file = function["file"]
+                        path_match = False
+                        
+                        # Strategy 1: Exact relative path match
+                        if relative_path in function_file:
+                            path_match = True
+                        # Strategy 2: Filename match
+                        elif filename in function_file:
+                            path_match = True
+                        
+                        if path_match:
+                            # Greedy selection: track the function with smallest range
+                            # (most specific/nested function containing the line)
+                            size = end_line - start_line
+                            if size < smallest_range:
+                                best_function = function
+                                smallest_range = size
+                                logger.debug(f"  Found matching function: {function['function_name']} in {function_file} (lines {start_line}-{end_line})")
         except FileNotFoundError as e:
             raise CodeQLError(f"Function tree file not found: {function_tree_file}") from e
         except PermissionError as e:
             raise CodeQLError(f"Permission denied reading function tree file: {function_tree_file}") from e
         except OSError as e:
             raise CodeQLError(f"OS error while reading function tree file: {function_tree_file}") from e
+
+        if best_function:
+            logger.debug(f"  Best function found: {best_function['function_name']} (range: {smallest_range})")
+        else:
+            logger.debug(f"  No function found for {file_path}:{line}")
 
         return best_function
 

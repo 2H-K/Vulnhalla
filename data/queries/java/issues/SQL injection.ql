@@ -1,6 +1,8 @@
 /**
  * @name SQL injection
  * @kind path-problem
+ * @id java/redteam/sql-injection
+ * @severity error
  */
 
 import java
