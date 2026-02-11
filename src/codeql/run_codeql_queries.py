@@ -8,13 +8,20 @@ By default, it compiles all .ql files under 'data/queries/<LANG>/tools' and
 in 'output/databases/<LANG>'.
 
 Example:
-    python src/codeql/run_codeql_queries.py
+    python src/codeql/run_codeql_queries.py -l java --db-dir webgoat
 """
 
 import subprocess
+import argparse
+import sys
+import os
 from pathlib import Path
 
-# Make sure your common_functions module is in your PYTHONPATH or same folder
+# 确保项目根目录在 Python 路径中
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.utils.common_functions import get_all_dbs
 from src.utils.config import get_codeql_path
 from src.utils.logger import get_logger
@@ -26,6 +33,46 @@ logger = get_logger(__name__)
 # Default locations/values
 DEFAULT_CODEQL = get_codeql_path()
 DEFAULT_LANG = "c"  # Mapped to data/queries/cpp for some tasks
+
+# 语言映射表：支持多种语言别名
+LANGUAGE_MAPPING = {
+    "c": "c",
+    "cpp": "c",
+    "c++": "c",
+    "java": "java",
+    "javascript": "javascript",
+    "js": "javascript",
+    "python": "python",
+    "go": "go",
+    "ruby": "ruby",
+    "csharp": "csharp",
+    "c#": "csharp",
+    "typescript": "typescript",
+    "ts": "typescript",
+}
+
+# 支持的语言列表
+SUPPORTED_LANGUAGES = ["c", "java", "javascript", "python", "go", "ruby", "csharp", "typescript"]
+
+def normalize_language(lang: str) -> str:
+    """
+    规范化语言名称为内部 CodeQL 语言代码。
+    
+    参数:
+        lang: 语言名称 (例如: "c++", "cpp", "java", "javascript")
+    
+    返回:
+        规范化的语言代码 (例如: "c", "java", "javascript")
+    """
+    lang_lower = lang.lower().strip()
+    
+    if lang_lower in LANGUAGE_MAPPING:
+        return LANGUAGE_MAPPING[lang_lower]
+    
+    if lang_lower in SUPPORTED_LANGUAGES:
+        return lang_lower
+    
+    raise ValueError(f"不支持的语言: '{lang}'. 支持的语言: {', '.join(SUPPORTED_LANGUAGES)}")
 
 
 def pre_compile_ql(file_name: str, threads: int, codeql_bin: str) -> None:
@@ -236,7 +283,8 @@ def compile_and_run_codeql_queries(
     codeql_bin: str = DEFAULT_CODEQL,
     lang: str = DEFAULT_LANG,
     threads: int = 16,
-    timeout: int = 300
+    timeout: int = 300,
+    db_dir: str = None
 ) -> None:
     """
     Compile and run CodeQL queries on CodeQL databases for a specific language.
@@ -245,60 +293,112 @@ def compile_and_run_codeql_queries(
     2. Enumerate all CodeQL DBs for the given language.
     3. Run each DB against both the 'tools' and 'issues' queries folders.
 
-    Args:
+    参数:
         codeql_bin (str, optional): Full path to the 'codeql' executable. Defaults to DEFAULT_CODEQL.
         lang (str, optional): Language code. Defaults to 'c' (which maps to data/queries/cpp).
         threads (int, optional): Number of threads for compilation/execution. Defaults to 16.
         timeout (int, optional): Timeout in seconds for bulk analysis. Defaults to 300.
+        db_dir (str, optional): Specific database directory to process. If None, processes all databases.
     
-    Raises:
+    异常:
         CodeQLConfigError: If CodeQL executable not found (from compilation or query execution).
         CodeQLExecutionError: If query compilation or execution fails.
     """
+    # 规范化语言代码
+    try:
+        lang = normalize_language(lang)
+    except ValueError as e:
+        logger.error(f"❌ {e}")
+        sys.exit(1)
+    
     # Setup paths
     queries_subfolder = "cpp" if lang == "c" else lang
     queries_folder = str(Path("data/queries") / queries_subfolder / "issues")
     tools_folder = str(Path("data/queries") / queries_subfolder / "tools")
-    dbs_folder = str(Path("output/databases") / lang)
+    
+    # 确定数据库文件夹路径
+    if db_dir:
+        # 如果指定了 db_dir，只处理指定的数据库目录
+        dbs_folder = str(Path("output/databases") / lang / db_dir)
+    else:
+        # 否则处理所有数据库
+        dbs_folder = str(Path("output/databases") / lang)
 
+    logger.info("🚀 开始运行 CodeQL 查询")
+    logger.info("=" * 60)
+    logger.info(f"语言: {lang}")
+    logger.info(f"数据库路径: {dbs_folder}")
+    logger.info("")
+    
     # Step 1: Pre-compile all queries
+    logger.info("[1/2] 预编译查询文件")
+    logger.info("-" * 60)
     compile_all_queries(tools_folder, threads, codeql_bin)
     compile_all_queries(queries_folder, threads, codeql_bin)
 
     # Step 2: List databases and run queries
-    logger.info(f"Running queries on each DB in {dbs_folder}")
+    logger.info("")
+    logger.info("[2/2] 在数据库上运行查询")
+    logger.info("-" * 60)
+    logger.info(f"运行查询: {dbs_folder}")
     
     # List what's in the folder for debugging
     try:
         dbs_folder_path = Path(dbs_folder)
+        if not dbs_folder_path.exists():
+            logger.error(f"❌ 数据库文件夹不存在: {dbs_folder}")
+            logger.error("   请确保数据库已放置在正确的位置。")
+            return
+            
         contents = list(dbs_folder_path.iterdir())
         if len(contents) == 0:
-            logger.warning(f"Database folder '{dbs_folder}' is empty. No databases to process.")
+            logger.warning(f"数据库文件夹 '{dbs_folder}' 为空。没有数据库需要处理。")
             return
-        logger.debug(f"Found {len(contents)} item(s) in database folder: {[str(c) for c in contents]}")
+        logger.debug(f"在数据库文件夹中发现 {len(contents)} 个项目: {[str(c) for c in contents]}")
     except OSError as e:
-        logger.warning(f"Cannot access database folder '{dbs_folder}': {e}. No databases to process.")
+        logger.warning(f"无法访问数据库文件夹 '{dbs_folder}': {e}. 没有数据库需要处理。")
         return
     
-    dbs_path = get_all_dbs(dbs_folder)
+    # 获取数据库路径列表
+    if db_dir:
+        # 如果指定了 db_dir，尝试多种方式查找数据库
+        dbs_path = []
+        
+        # 方式1: 直接检查指定路径是否包含 codeql-database.yml
+        if (dbs_folder_path / "codeql-database.yml").exists():
+            dbs_path.append(str(dbs_folder_path))
+            logger.info(f"在指定路径找到数据库: {dbs_folder_path}")
+        else:
+            # 方式2: 递归搜索指定目录下的所有数据库
+            for root, dirs, files in os.walk(str(dbs_folder_path)):
+                if 'codeql-database.yml' in files:
+                    dbs_path.append(root)
+                    logger.info(f"递归找到数据库: {root}")
+            
+            if not dbs_path:
+                logger.warning(f"在 '{dbs_folder}' 中未找到包含 codeql-database.yml 的数据库目录。")
+    else:
+        # 使用通用方法获取所有数据库
+        dbs_path = get_all_dbs(dbs_folder)
     
     if len(dbs_path) == 0:
-        logger.warning(f"No valid databases found in '{dbs_folder}'. Expected structure: <dbs_folder>/<repo_name>/<db_name>/codeql-database.yml")
-        logger.warning("Make sure databases were downloaded and extracted successfully.")
+        logger.warning(f"在 '{dbs_folder}' 中未找到有效的数据库。")
+        logger.warning("期望结构: <dbs_folder>/<repo_name>/<db_name>/codeql-database.yml")
+        logger.warning("请确保数据库已正确下载和解压。")
         return
     
     for curr_db in dbs_path:
-        logger.info(f"Processing DB: {curr_db}")
+        logger.info(f"处理数据库: {curr_db}")
         
         # Check if database folder is empty
         curr_db_path = Path(curr_db)
         if curr_db_path.is_dir():
             try:
                 if len(list(curr_db_path.iterdir())) == 0:
-                    logger.warning(f"Database folder '{curr_db}' is empty. Skipping queries.")
+                    logger.warning(f"数据库文件夹 '{curr_db}' 为空。跳过查询。")
                     continue
             except OSError:
-                logger.warning(f"Cannot access database folder '{curr_db}'. Skipping.")
+                logger.warning(f"无法访问数据库文件夹 '{curr_db}'。跳过。")
                 continue
         
         # If issues.csv was not generated yet, or FunctionTree.csv missing, run
@@ -313,20 +413,73 @@ def compile_and_run_codeql_queries(
                 timeout
             )
         else:
-            logger.info("Output files already exist for this DB, skipping...")
+            logger.info("输出文件已存在，跳过...")
 
-    logger.info("All databases processed.")
+    logger.info("")
+    logger.info("✅ 所有数据库处理完成！")
 
 
 def main_cli() -> None:
     """
-    CLI entry point for running codeql queries with defaults.
+    命令行入口点，用于运行 CodeQL 查询。
+    
+    使用方法:
+        python src/codeql/run_codeql_queries.py -l java --db-dir webgoat
+        python src/codeql/run_codeql_queries.py --lang cpp --threads 8
     """
+    parser = argparse.ArgumentParser(
+        description="编译并运行 CodeQL 查询，分析指定语言的代码数据库。",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+    # 分析 Java 数据库 (默认使用 output/databases/java 下的所有数据库)
+    python -m src.codeql.run_codeql_queries -l java
+    
+    # 分析特定的 Java 数据库目录
+    python -m src.codeql.run_codeql_queries -l java --db-dir webgoat
+    
+    # 分析 C++ 数据库，使用 8 个线程
+    python -m src.codeql.run_codeql_queries -l cpp --threads 8
+        """
+    )
+    
+    parser.add_argument(
+        "--language", "-l",
+        type=str,
+        default="c",
+        help="编程语言 (默认: c). 支持: c, cpp, c++, java, javascript, js, python, go, ruby, csharp, c#, typescript, ts"
+    )
+    
+    parser.add_argument(
+        "--db-dir",
+        type=str,
+        default=None,
+        help="特定的数据库目录名称。如果不指定，将处理该语言下所有数据库。"
+    )
+    
+    parser.add_argument(
+        "--threads", "-t",
+        type=int,
+        default=16,
+        help="编译和执行时使用的线程数 (默认: 16)"
+    )
+    
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="批量分析的超时时间（秒）(默认: 300)"
+    )
+    
+    args = parser.parse_args()
+    
+    # 运行查询
     compile_and_run_codeql_queries(
         codeql_bin=DEFAULT_CODEQL,
-        lang=DEFAULT_LANG,
-        threads=16,
-        timeout=300
+        lang=args.language,
+        threads=args.threads,
+        timeout=args.timeout,
+        db_dir=args.db_dir
     )
 
 

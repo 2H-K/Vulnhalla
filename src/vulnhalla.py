@@ -35,6 +35,8 @@ from src.utils.common_functions import (
     write_file_ascii,
     read_yml
 )
+# Import path normalizer
+from src.utils.path_normalizer import PathNormalizer
 
 # Script that holds your GPT logic
 from src.llm.llm_analyzer import LLMAnalyzer
@@ -205,46 +207,25 @@ class IssueAnalyzer:
         Raises:
             CodeQLError: If function tree file cannot be read (not found, permission denied, etc.).
         """
+        # 使用统一的路径标准化模块
+        relative_path, filename = PathNormalizer.build_function_tree_lookup_path(file_path)
+        
         keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
         best_function = None
         smallest_range = float('inf')
-
-        # Extract relative path from the input file_path
-        # Handle both full paths (F:/Code_Audit/...) and relative paths (/fastbee-common/...)
-        # Normalize to remove drive letter and extract the meaningful part
-        relative_path = file_path
-        
-        # If path starts with drive letter, extract the part after the source prefix
-        if ":" in file_path:
-            # Split on :/ to get the part after drive letter
-            parts = file_path.split(":/")
-            if len(parts) > 1:
-                # Try to find the actual file name part
-                # Typically: F:/Code_Audit/fastbee/springboot/fastbee-common/...
-                # We want: fastbee-common/... or just the file name
-                path_parts = parts[1].split("/")
-                # Find the module name (like fastbee-common, fastbee-framework, etc.)
-                for i, part in enumerate(path_parts):
-                    if part and not part.startswith("Code_Audit") and not part.startswith("springboot"):
-                        # Found the module name, use from here
-                        relative_path = "/".join(path_parts[i:])
-                        break
-        elif file_path.startswith("/"):
-            # Already a relative path, just use it
-            relative_path = file_path
-
-        # Also extract just the filename as a fallback
-        filename = Path(file_path).name
 
         logger.debug(f"find_function_by_line: file_path={file_path}, relative_path={relative_path}, filename={filename}, line={line}")
 
         try:
             with Path(function_tree_file).open("r", encoding="utf-8") as f:
                 for row in f:
-                    # Try multiple matching strategies
+                    # 尝试多种匹配策略
                     match_found = False
-                    if relative_path in row:
+                    
+                    # 策略1: 相对路径匹配
+                    if relative_path and relative_path in row:
                         match_found = True
+                    # 策略2: 纯文件名匹配
                     elif filename in row:
                         match_found = True
                     
@@ -268,10 +249,10 @@ class IssueAnalyzer:
                         function_file = function["file"]
                         path_match = False
                         
-                        # Strategy 1: Exact relative path match
-                        if relative_path in function_file:
+                        # 策略1: 相对路径精确匹配
+                        if relative_path and relative_path in function_file:
                             path_match = True
-                        # Strategy 2: Filename match
+                        # 策略2: 纯文件名匹配
                         elif filename in function_file:
                             path_match = True
                         
@@ -695,20 +676,30 @@ class IssueAnalyzer:
             logger.debug(f"Message: {issue['message'][:100]}...")
             
             # --- 路径自愈与追踪 ---
-            source_prefix = db_yml.get("sourceLocationPrefix", "").replace("\\", "/")
-            drive_letter = source_prefix.split(":")[0] if ":" in source_prefix else ""
+            # 处理 issues.csv 中的 file 字段
+            # 格式可能是: /src/main/java/... (无前缀) 或 relative:///src/main/java/...
             raw_issue_file = issue["file"].replace("\\", "/")
             
-            if ":" in raw_issue_file:
-                full_logical_path = raw_issue_file.lstrip("/")
-            else:
-                full_logical_path = f"{source_prefix.rstrip('/')}/{raw_issue_file.lstrip('/')}"
-
-            if full_logical_path.startswith(":/"):
-                full_logical_path = (drive_letter or "F") + full_logical_path
-
-            path_version_colon = full_logical_path
-            path_version_underscore = path_version_colon.replace(":", "_", 1)
+            # 移除可能的 relative:// 前缀
+            if raw_issue_file.startswith("relative://"):
+                raw_issue_file = raw_issue_file[len("relative://"):]
+            elif raw_issue_file.startswith("file://"):
+                raw_issue_file = raw_issue_file[len("file://"):]
+            
+            # 获取 sourceLocationPrefix 并标准化
+            source_prefix = db_yml.get("sourceLocationPrefix", "").replace("\\", "/")
+            
+            # 标准化 source_prefix
+            if ":" in source_prefix:
+                # Windows 原始路径如 F:\Code_Audit\WebGoat-2023.8 → F_/Code_Audit/WebGoat-2023.8
+                drive_letter = source_prefix.split(":")[0]
+                source_prefix = f"{drive_letter}_/{source_prefix.split(':')[1].lstrip('/')}"
+            
+            # 拼接：sourceLocationPrefix + file_path（去除前导斜杠）
+            full_logical_path = f"{source_prefix}/{raw_issue_file.lstrip('/')}".replace("//", "/")
+            
+            path_version_underscore = full_logical_path  # 下划线版本用于 ZIP 读取
+            path_version_colon = full_logical_path.replace("_", ":", 1)  # 冒号版本用于查找
 
             logger.debug(f"Issue {issue_id} Path Mapping Trace:")
             logger.debug(f"  - ZIP Target: {path_version_underscore}")
@@ -743,6 +734,8 @@ class IssueAnalyzer:
                         logger.warning(f"Issue {issue_id}: JS beautification failed: {str(e)}")
 
             code_file_contents = code_file_contents_raw.split("\n")
+            # FunctionTree.csv 中的 file 字段是完整路径（如 F:/Code_Audit/WebGoat-2023.8/src/main/java/...）
+            # 所以需要用 path_version_colon（冒号版本）去匹配
             current_function = self.find_function_by_line(
                 function_tree_file, path_version_colon, int(issue["start_line"])
             )
@@ -905,10 +898,28 @@ class IssueAnalyzer:
             self.process_issue_type(issue_type, issues_statistics[issue_type], llm_analyzer)
 
 if __name__ == '__main__':
+    import argparse
     from src.utils.logger import setup_logging
-    # 使用 force=True 确保 DEBUG 级别被正确应用
-    setup_logging(log_level="DEBUG", force=True)
     
-    analyzer = IssueAnalyzer(lang="javascript") # 根据你的执行命令修改
+    parser = argparse.ArgumentParser(description="Vulnhalla Issue Analyzer")
+    parser.add_argument("command", nargs="?", help="Command: 'local-db' or GitHub repository name (e.g., 'redis/redis')")
+    parser.add_argument("db_dir", nargs="?", help="Database directory name when using local-db")
+    parser.add_argument("--language", "-l", default="c", 
+                       choices=["c", "java", "javascript"],
+                       help="Programming language (default: c)")
+    
+    args = parser.parse_args()
+    
+    # Parse arguments
+    db_dir = None
+    if args.command == "local-db":
+        db_dir = args.db_dir
+        if not db_dir:
+            logger.error("❌ Error: When using local-db, you must specify a database directory name")
+            logger.error("   Example: python src/vulnhalla.py local-db fastbee --language java")
+            sys.exit(1)
+    
+    setup_logging(log_level="DEBUG", force=True)
+    analyzer = IssueAnalyzer(lang=args.language, db_dir=db_dir)
     analyzer.run()
 

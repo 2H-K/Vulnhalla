@@ -35,9 +35,8 @@ def setup_logging(
         # 非 DEBUG 模式下也过滤 LiteLLM
         return not any(record["name"].startswith(m) for m in ["LiteLLM"] + tp_modules)
 
-    # 包含文件、函数、行号的详细格式
+    # 移除时间，仅保留级别、位置和消息
     fmt = (
-        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | "
         "<cyan>{name}:{function}:{line}</cyan> - <level>{message}</level>"
     )

@@ -15,6 +15,7 @@ from src.utils.common_functions import read_file_lines_from_zip
 from src.utils.csv_parser import parse_csv_row
 from src.utils.logger import get_logger
 from src.utils.cache_manager import CacheManager
+from src.utils.path_normalizer import PathNormalizer, extract_function_lines_path
 
 logger = get_logger(__name__)
 
@@ -131,8 +132,11 @@ class CodeQLDBLookup:
         Raises:
             CodeQLError: If function tree file cannot be read (not found, permission denied, etc.).
         """
-        # DEBUG: Log entry parameters
+        # 使用路径标准化模块提取用于查找的路径
+        relative_path, filename = PathNormalizer.build_function_tree_lookup_path(file)
+        
         logger.debug(f"get_function_by_line called with file={file}, line={line}")
+        logger.debug(f"  -> lookup paths: relative={relative_path}, filename={filename}")
 
         keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
 
@@ -141,23 +145,46 @@ class CodeQLDBLookup:
         best_function = None
 
         for function in self._iter_csv_lines(function_tree_file, "Function tree file"):
-            if file in function:
-                row_dict = parse_csv_row(function, keys)
-                if row_dict and row_dict["start_line"] and row_dict["end_line"]:
-                    start = int(row_dict["start_line"])
-                    end = int(row_dict["end_line"])
-                    logger.debug(f"Checking line range: start={start}, end={end}, target_line={line}")
+            # 尝试多种匹配策略
+            match_found = False
+            
+            # 策略1: 相对路径匹配
+            if relative_path and relative_path in function:
+                match_found = True
+            # 策略2: 纯文件名匹配
+            elif filename in function:
+                match_found = True
+            
+            if not match_found:
+                continue
+                
+            row_dict = parse_csv_row(function, keys)
+            if row_dict and row_dict["start_line"] and row_dict["end_line"]:
+                start = int(row_dict["start_line"])
+                end = int(row_dict["end_line"])
+                logger.debug(f"Checking line range: start={start}, end={end}, target_line={line}")
 
-                    if start <= line <= end:
-                        if file in row_dict["file"]:
-                            # Greedy selection: track function with smallest range
-                            # (most specific/nested function containing the line)
-                            size = end - start
-                            logger.debug(f"Found matching function with size={size}, current smallest={smallest_range}")
-                            if size < smallest_range:
-                                smallest_range = size
-                                best_function = row_dict
-                                logger.debug(f"Updated best_function: {best_function}")
+                if start <= line <= end:
+                    # 检查路径匹配（使用多种策略）
+                    function_file = row_dict["file"]
+                    path_match = False
+                    
+                    # 策略1: 相对路径精确匹配
+                    if relative_path and relative_path in function_file:
+                        path_match = True
+                    # 策略2: 纯文件名匹配
+                    elif filename in function_file:
+                        path_match = True
+                    
+                    if path_match:
+                        # Greedy selection: track function with smallest range
+                        # (most specific/nested function containing the line)
+                        size = end - start
+                        logger.debug(f"Found matching function with size={size}, current smallest={smallest_range}")
+                        if size < smallest_range:
+                            smallest_range = size
+                            best_function = row_dict
+                            logger.debug(f"Updated best_function: {best_function}")
 
         return best_function
 
@@ -417,7 +444,7 @@ class CodeQLDBLookup:
 
         Returns:
             Tuple[str, int, int, List[str]]:
-                - file_path (str): The file path (after .replace and [1:])
+                - file_path (str): The file path (standardized for ZIP reading)
                 - start_line (int): Starting line number
                 - end_line (int): Ending line number
                 - all_lines (List[str]): Full file splitlines
@@ -426,7 +453,8 @@ class CodeQLDBLookup:
             CodeQLError: If ZIP file cannot be read or file not found in archive.
         """
         src_zip = Path(db_path) / "src.zip"
-        file_path = current_function["file"].replace("\"", "")[1:]
+        # 使用路径标准化模块处理路径，避免 [1:] 的问题
+        file_path = extract_function_lines_path(current_function["file"])
         code_file = read_file_lines_from_zip(str(src_zip), file_path)
         lines = code_file.split("\n")
 

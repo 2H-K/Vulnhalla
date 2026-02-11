@@ -408,27 +408,13 @@ class LLMAnalyzer:
         messages: List[Dict[str, Any]] = self.MESSAGES[:]
         messages.append({"role": "user", "content": prompt})
 
-        # Log initial message stats for debugging
+        # 仅打印prompt长度，避免打印具体内容
         total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
-        logger.info(f"  💬 Initial messages: {len(messages)} messages, ~{total_chars} chars")
-
-        # 🔍 DEBUG: 打印消息详细内容
-        logger.debug(f"=== DEBUG LLM MESSAGES ===")
-        for i, msg in enumerate(messages):
-            content = str(msg.get('content', ''))
-            logger.debug(f"Message {i+1} ({msg.get('role', 'unknown')}): {len(content)} chars")
-            if len(content) > 1000:
-                logger.debug(f"  Content preview: {content[:200]}...")
-            else:
-                logger.debug(f"  Content: {content}")
-        logger.debug(f"=== END DEBUG MESSAGES ===")
-
-        # Additional safety check for context window limits
-        # Rough estimation: 1 token ≈ 4 characters for most models
         estimated_tokens = total_chars // 4
-        if estimated_tokens > 120000:  # Conservative limit below model's 131072 token limit
-            logger.warning(f"Context window may be too large: ~{estimated_tokens} estimated tokens")
-            # For very long prompts, we could implement chunking or summarization here
+        if estimated_tokens > 120000:
+            logger.error(f"Context window may be too large: ~{estimated_tokens} estimated tokens")
+        else:
+            logger.debug(f"Prompt length: {estimated_tokens} tokens (~{total_chars} chars)")
 
         # Check cache first
         if use_cache and self.cache_manager.enabled:
@@ -477,19 +463,11 @@ class LLMAnalyzer:
             final_content = content_obj.content or ""
             tool_calls = content_obj.tool_calls
 
-            # Log message stats after each LLM response
+            # 仅在超长时打印错误
             total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
-            logger.info(f"  🔄 LLM response #{amount_of_tools + 1}: {len(messages)} messages, ~{total_chars} chars")
-
-            # 🔍 DEBUG: 如果消息变得很大，显示详细信息
-            if total_chars > 500000:
-                logger.debug(f"=== LARGE MESSAGE DEBUG ===")
-                for i, msg in enumerate(messages):
-                    content = str(msg.get('content', ''))
-                    logger.debug(f"Message {i+1} ({msg.get('role', 'unknown')}): {len(content)} chars")
-                    if len(content) > 10000:
-                        logger.debug(f"  Large content preview: {content[:500]}...")
-                logger.debug(f"=== END LARGE MESSAGE DEBUG ===")
+            estimated_tokens = total_chars // 4
+            if estimated_tokens > 120000:
+                logger.error(f"Context window may be too large: ~{estimated_tokens} estimated tokens after response")
 
             if not tool_calls:
                 # Check if we have a recognized status code
