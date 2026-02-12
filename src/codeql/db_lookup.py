@@ -138,7 +138,7 @@ class CodeQLDBLookup:
         logger.debug(f"get_function_by_line called with file={file}, line={line}")
         logger.debug(f"  -> lookup paths: relative={relative_path}, filename={filename}")
 
-        keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
+        keys = ["function_name", "file_path", "start_line", "end_line", "function_id", "caller_ids"]
 
         # Initialize tracking variables for greedy selection
         smallest_range = float('inf')
@@ -159,14 +159,15 @@ class CodeQLDBLookup:
                 continue
                 
             row_dict = parse_csv_row(function, keys)
-            if row_dict and row_dict["start_line"] and row_dict["end_line"]:
+            if row_dict and row_dict.get("start_line") and row_dict.get("end_line"):
                 start = int(row_dict["start_line"])
                 end = int(row_dict["end_line"])
                 logger.debug(f"Checking line range: start={start}, end={end}, target_line={line}")
 
                 if start <= line <= end:
                     # 检查路径匹配（使用多种策略）
-                    function_file = row_dict["file"]
+                    function_file = row_dict.get("file_path", "")
+                    row_dict["file"] = function_file
                     path_match = False
                     
                     # 策略1: 相对路径精确匹配
@@ -213,7 +214,7 @@ class CodeQLDBLookup:
             Raises:
                 CodeQLError: If function tree file cannot be read (not found, permission denied, etc.).
             """
-            keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
+            keys = ["function_name", "file_path", "start_line", "end_line", "function_id", "caller_ids"]
             function_name_only = function_name.split("::")[-1]
 
             for current_function in all_function:
@@ -227,6 +228,7 @@ class CodeQLDBLookup:
                                 row_dict = parse_csv_row(row, keys)
                                 if not row_dict:
                                     continue
+                                row_dict["file"] = row_dict.get("file_path", "")
 
                                 candidate_name = row_dict["function_name"].replace("\"", "")
                                 if (candidate_name == function_name_only
@@ -360,7 +362,7 @@ class CodeQLDBLookup:
             CodeQLError: If Classes CSV file cannot be read (not found, permission denied, etc.).
         """
         classes_file = Path(curr_db) / "Classes.csv"
-        keys = ["type", "class_name", "file", "start_line", "end_line", "simple_name"]
+        keys = ["type", "class_name", "simple_name", "file", "start_line", "end_line", "class_id"]
         class_name_only = class_name.split("::")[-1]
 
         for row in self._iter_csv_lines(classes_file, "Classes CSV"):
@@ -404,24 +406,32 @@ class CodeQLDBLookup:
         Raises:
             CodeQLError: If function tree file cannot be read (not found, permission denied, etc.).
         """
-        keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
-        caller_id = current_function["caller_id"].replace("\"", "").strip()
+        keys = ["function_name", "file_path", "start_line", "end_line", "function_id", "caller_ids"]
+        caller_ids_raw = (
+            current_function.get("caller_id")
+            or current_function.get("caller_ids")
+            or ""
+        )
+        caller_ids_raw = caller_ids_raw.replace("\"", "").strip()
+        caller_ids = [cid for cid in caller_ids_raw.split("|") if cid and cid != "NONE"]
 
-        for line in self._iter_csv_lines(function_tree_file, "Function tree file"):
-            if caller_id in line:
-                data_dict = parse_csv_row(line, keys)
-                if not data_dict:
-                    continue
-                if data_dict["function_id"].replace("\"", "").strip() == caller_id:
-                    return data_dict
+        for caller_id in caller_ids:
+            for line in self._iter_csv_lines(function_tree_file, "Function tree file"):
+                if caller_id in line:
+                    data_dict = parse_csv_row(line, keys)
+                    if not data_dict:
+                        continue
+                    if data_dict["function_id"].replace("\"", "").strip() == caller_id:
+                        data_dict["file"] = data_dict.get("file_path", "")
+                        return data_dict
 
-        # Fallback if 'caller_id' is in format file:line
-        maybe_line = caller_id.split(":")
-        if len(maybe_line) == 2:
-            file_part, line_part = maybe_line
-            function = self.get_function_by_line(function_tree_file, file_part[1:], int(line_part))
-            if function:
-                return function
+            # Fallback if 'caller_id' is in format file:line
+            maybe_line = caller_id.split(":")
+            if len(maybe_line) == 2:
+                file_part, line_part = maybe_line
+                function = self.get_function_by_line(function_tree_file, file_part[1:], int(line_part))
+                if function:
+                    return function
 
         return (
             "Caller function was not found. "

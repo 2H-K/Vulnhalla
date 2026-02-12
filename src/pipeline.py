@@ -370,7 +370,7 @@ def main_analyze() -> None:
     parser = argparse.ArgumentParser(description="Vulnhalla Analysis Pipeline")
     parser.add_argument("command", nargs="?", help="Command: 'local-db' or GitHub repository name (e.g., 'redis/redis')")
     parser.add_argument("db_dir", nargs="?", help="Database directory name when using local-db")
-    parser.add_argument("--language", "-l", default="c", choices=["c", "java", "javascript"],
+    parser.add_argument("--language", "-l", default="c", choices=["c", "java", "javascript",'csharp','typescript','go','python'],
                        help="Programming language (default: c)")
 
     args = parser.parse_args()

@@ -210,7 +210,6 @@ class IssueAnalyzer:
         # 使用统一的路径标准化模块
         relative_path, filename = PathNormalizer.build_function_tree_lookup_path(file_path)
         
-        keys = ["function_name", "file", "start_line", "function_id", "end_line", "caller_id"]
         best_function = None
         smallest_range = float('inf')
 
@@ -218,52 +217,35 @@ class IssueAnalyzer:
 
         try:
             with Path(function_tree_file).open("r", encoding="utf-8") as f:
-                for row in f:
-                    # 尝试多种匹配策略
-                    match_found = False
-                    
-                    # 策略1: 相对路径匹配
-                    if relative_path and relative_path in row:
+                reader = csv.DictReader(f)
+                for function in reader:
+                    function_file = function.get("file_path") or function.get("file") or ""
+                    if not function_file:
+                        continue
+
+                    if relative_path and relative_path in function_file:
                         match_found = True
-                    # 策略2: 纯文件名匹配
-                    elif filename in row:
+                    elif filename and filename in function_file:
                         match_found = True
-                    
+                    else:
+                        match_found = False
+
                     if not match_found:
                         continue
 
-                    fields = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', row.strip())
-                    if len(fields) != len(keys):
-                        continue  # Skip malformed rows
-
-                    function = dict(zip(keys, fields))
                     try:
-                        start_line = int(function["start_line"])
-                        end_line = int(function["end_line"])
+                        start_line = int(function.get("start_line", 0))
+                        end_line = int(function.get("end_line", 0))
                     except ValueError:
-                        continue  # Skip if lines aren't integers
+                        continue
 
-                    # Check if the target line falls within this function's range
                     if start_line <= line <= end_line:
-                        # Check path match with multiple strategies
-                        function_file = function["file"]
-                        path_match = False
-                        
-                        # 策略1: 相对路径精确匹配
-                        if relative_path and relative_path in function_file:
-                            path_match = True
-                        # 策略2: 纯文件名匹配
-                        elif filename in function_file:
-                            path_match = True
-                        
-                        if path_match:
-                            # Greedy selection: track the function with smallest range
-                            # (most specific/nested function containing the line)
-                            size = end_line - start_line
-                            if size < smallest_range:
-                                best_function = function
-                                smallest_range = size
-                                logger.debug(f"  Found matching function: {function['function_name']} in {function_file} (lines {start_line}-{end_line})")
+                        size = end_line - start_line
+                        if size < smallest_range:
+                            function["file"] = function_file
+                            best_function = function
+                            smallest_range = size
+                            logger.debug(f"  Found matching function: {function.get('function_name')} in {function_file} (lines {start_line}-{end_line})")
         except FileNotFoundError as e:
             raise CodeQLError(f"Function tree file not found: {function_tree_file}") from e
         except PermissionError as e:
@@ -272,7 +254,7 @@ class IssueAnalyzer:
             raise CodeQLError(f"OS error while reading function tree file: {function_tree_file}") from e
 
         if best_function:
-            logger.debug(f"  Best function found: {best_function['function_name']} (range: {smallest_range})")
+            logger.debug(f"  Best function found: {best_function.get('function_name')} (range: {smallest_range})")
         else:
             logger.debug(f"  No function found for {file_path}:{line}")
 
@@ -349,18 +331,13 @@ class IssueAnalyzer:
             start_offset = match.group(5)
             end_offset = match.group(6)
 
-            if path_type == "relative://":
-                # 拼接完整路径
-                full_path = f"{code_path}/{file_path.lstrip('/')}".replace("//", "/")
-            else:
-                # 对于 file:// 类型，直接使用原始路径（包括开头的斜杠）
-                # 因为 CSV 中的路径已经是相对于 sourceLocationPrefix 的完整路径
-                full_path = file_path
+            # 统一处理路径：兼容 relative:// / file:// / 无前缀
+            path_version_colon, path_version_underscore = PathNormalizer.build_zip_path(
+                code_path,
+                file_path,
+                path_type
+            )
 
-            # Try both colon and underscore versions for ZIP compatibility (Windows paths)
-            # Generate two versions of the path: with colon and with underscore
-            path_version_colon = full_path
-            path_version_underscore = full_path.replace(":", "_")
 
             # Try to read from ZIP with both path versions
             code_text = None
@@ -580,18 +557,13 @@ class IssueAnalyzer:
             file_ref = file_ref.strip()
 
             # Resolve file path based on path type
-            if path_type == "relative://":
-                # 拼接完整路径
-                file_ref = f"{self.code_path}/{file_ref.lstrip('/')}".replace("//", "/")
-            else:
-                # 对于 file:// 类型，直接使用原始路径（包括开头的斜杠）
-                # 因为 CSV 中的路径已经是相对于 sourceLocationPrefix 的完整路径
-                file_ref = file_ref
+            path_version_colon, path_version_underscore = PathNormalizer.build_zip_path(
+                self.code_path,
+                file_ref,
+                path_type
+            )
+            file_ref = path_version_colon
 
-            # Try both colon and underscore versions for ZIP compatibility (Windows paths)
-            # Generate two versions of the path: with colon and with underscore
-            path_version_colon = file_ref
-            path_version_underscore = file_ref.replace(":", "_")
 
             # If it's within the same function's line range, skip
             start_line_func = int(current_function["start_line"])
@@ -675,37 +647,20 @@ class IssueAnalyzer:
             logger.debug(f"Line: {issue['start_line']}:{issue['start_offset']}-{issue['end_offset']}")
             logger.debug(f"Message: {issue['message'][:100]}...")
             
-            # --- 路径自愈与追踪 ---
-            # 处理 issues.csv 中的 file 字段
-            # 格式可能是: /src/main/java/... (无前缀) 或 relative:///src/main/java/...
-            raw_issue_file = issue["file"].replace("\\", "/")
-            
-            # 移除可能的 relative:// 前缀
-            if raw_issue_file.startswith("relative://"):
-                raw_issue_file = raw_issue_file[len("relative://"):]
-            elif raw_issue_file.startswith("file://"):
-                raw_issue_file = raw_issue_file[len("file://"):]
-            
-            # 获取 sourceLocationPrefix 并标准化
-            source_prefix = db_yml.get("sourceLocationPrefix", "").replace("\\", "/")
-            
-            # 标准化 source_prefix
-            if ":" in source_prefix:
-                # Windows 原始路径如 F:\Code_Audit\WebGoat-2023.8 → F_/Code_Audit/WebGoat-2023.8
-                drive_letter = source_prefix.split(":")[0]
-                source_prefix = f"{drive_letter}_/{source_prefix.split(':')[1].lstrip('/')}"
-            
-            # 拼接：sourceLocationPrefix + file_path（去除前导斜杠）
-            full_logical_path = f"{source_prefix}/{raw_issue_file.lstrip('/')}".replace("//", "/")
-            
-            path_version_underscore = full_logical_path  # 下划线版本用于 ZIP 读取
-            path_version_colon = full_logical_path.replace("_", ":", 1)  # 冒号版本用于查找
+            # --- 路径自愈与追踪（统一通过 PathNormalizer） ---
+            source_prefix = db_yml.get("sourceLocationPrefix", "")
+            path_version_colon, path_version_underscore = PathNormalizer.build_zip_path(
+                source_prefix,
+                issue["file"]
+            )
 
             logger.debug(f"Issue {issue_id} Path Mapping Trace:")
             logger.debug(f"  - ZIP Target: {path_version_underscore}")
+            logger.debug(f"  - FunctionTree Target: {path_version_colon}")
 
             # --- 尝试读取 ZIP ---
             self.code_path = source_prefix
+
             function_tree_file = str(db_path_obj / "FunctionTree.csv")
             src_zip_path = str(db_path_obj / "src.zip")
 
