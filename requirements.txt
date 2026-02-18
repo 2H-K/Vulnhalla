@@ -6,3 +6,4 @@ pySmartDL
 pytest
 loguru
 jsbeautifier
+ijson

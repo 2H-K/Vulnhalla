@@ -43,7 +43,7 @@ from src.llm.llm_analyzer import LLMAnalyzer
 from src.llm.strategies.factory import get_strategy
 from src.utils.config_validator import validate_and_exit_on_error
 from src.utils.logger import get_logger
-from src.utils.exceptions import VulnhallaError, CodeQLError
+from src.utils.exceptions import VulnhallaError, CodeQLError, LLMApiError
 
 logger = get_logger(__name__)
 # For JS beautification
@@ -623,6 +623,7 @@ class IssueAnalyzer:
         real_issues = []
         false_issues = []
         more_data = []
+        skipped_issues = []  # Track issues skipped due to LLM errors (timeout, rate limit, etc.)
 
         logger.info(f"Processing Issue Type: {issue_type} | Count: {len(issues_of_type)}")
 
@@ -776,11 +777,18 @@ class IssueAnalyzer:
                 else: more_data.append(issue_id)
 
                 logger.info(f"Issue {issue_id}: Analysis complete -> {status}")
+            except LLMApiError as e:
+                logger.warning(f"Issue ID: {issue_id} SKIPPED - LLM error: {e}")
+                skipped_issues.append(issue_id)
+                issue_id += 1
+                continue
             except Exception as e:
                 logger.error(f"LLM Call Failed for Issue {issue_id}: {str(e)}")
                 # 这里会打印出具体的 ContextWindowExceededError
 
         logger.info(f"Summary for {issue_type}: TP={len(real_issues)}, FP={len(false_issues)}")
+        if skipped_issues:
+            logger.warning(f"Skipped (LLM errors): {len(skipped_issues)} (IDs: {skipped_issues})")
     def run(self) -> None:
         """
         Main analysis routine:

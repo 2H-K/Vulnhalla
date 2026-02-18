@@ -108,6 +108,42 @@ class CodeQLDBLookup:
             # Fallback for unexpected exception types
             return CodeQLError(f"Error reading {file_type_name}: {file_path_str}")
 
+    @staticmethod
+    def _strip_quotes(value: str) -> str:
+        return value.replace("\"", "").strip()
+
+    @staticmethod
+    def _is_int(value: str) -> bool:
+        try:
+            int(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    def _normalize_function_tree_row(self, row_dict: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+        if not row_dict:
+            return row_dict
+
+        # Normalize whitespace early
+        for key, val in row_dict.items():
+            if val is not None:
+                row_dict[key] = str(val).strip()
+
+        start_line = self._strip_quotes(row_dict.get("start_line", ""))
+        end_line = self._strip_quotes(row_dict.get("end_line", ""))
+        function_id = self._strip_quotes(row_dict.get("function_id", ""))
+
+        # Some CodeQL exports use: name,file,start_line,function_id,end_line,caller_ids
+        if (not self._is_int(end_line)) and self._is_int(function_id):
+            row_dict["end_line"], row_dict["function_id"] = row_dict["function_id"], row_dict["end_line"]
+
+        for key in ["function_name", "file_path", "start_line", "end_line", "function_id", "caller_ids"]:
+            if key in row_dict and row_dict[key] is not None:
+                row_dict[key] = self._strip_quotes(str(row_dict[key]))
+
+        return row_dict
+
+
     def get_function_by_line(
         self,
         function_tree_file: str,
@@ -159,10 +195,12 @@ class CodeQLDBLookup:
                 continue
                 
             row_dict = parse_csv_row(function, keys)
+            row_dict = self._normalize_function_tree_row(row_dict)
             if row_dict and row_dict.get("start_line") and row_dict.get("end_line"):
                 start = int(row_dict["start_line"])
                 end = int(row_dict["end_line"])
                 logger.debug(f"Checking line range: start={start}, end={end}, target_line={line}")
+
 
                 if start <= line <= end:
                     # 检查路径匹配（使用多种策略）
@@ -226,11 +264,13 @@ class CodeQLDBLookup:
                                 break
                             if current_function["function_id"] in row:
                                 row_dict = parse_csv_row(row, keys)
+                                row_dict = self._normalize_function_tree_row(row_dict)
                                 if not row_dict:
                                     continue
                                 row_dict["file"] = row_dict.get("file_path", "")
 
                                 candidate_name = row_dict["function_name"].replace("\"", "")
+
                                 if (candidate_name == function_name_only
                                         or (less_strict and function_name_only in candidate_name)):
                                     return row_dict, current_function
@@ -426,12 +466,19 @@ class CodeQLDBLookup:
                         return data_dict
 
             # Fallback if 'caller_id' is in format file:line
-            maybe_line = caller_id.split(":")
-            if len(maybe_line) == 2:
-                file_part, line_part = maybe_line
-                function = self.get_function_by_line(function_tree_file, file_part[1:], int(line_part))
-                if function:
-                    return function
+            caller_id_clean = caller_id.strip().strip("\"")
+            if ":" in caller_id_clean:
+                file_part, line_part = caller_id_clean.rsplit(":", 1)
+                line_part = line_part.strip().strip("\"")
+                if line_part.isdigit():
+                    function = self.get_function_by_line(
+                        function_tree_file,
+                        file_part.lstrip("/"),
+                        int(line_part)
+                    )
+                    if function:
+                        return function
+
 
         return (
             "Caller function was not found. "
