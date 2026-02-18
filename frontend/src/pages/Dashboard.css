@@ -1,0 +1,62 @@
+/* 仪表盘样式 */
+.dashboard {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.page-header {
+  margin-bottom: 24px;
+}
+
+.page-title {
+  margin-bottom: 8px !important;
+}
+
+.page-subtitle {
+  margin-bottom: 0 !important;
+  font-size: 14px;
+}
+
+.stats-row {
+  margin-bottom: 32px;
+}
+
+.stat-card {
+  text-align: center;
+  transition: all 0.3s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+}
+
+.stat-card .ant-statistic-title {
+  font-size: 14px;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.stat-card .ant-statistic-content {
+  font-size: 32px;
+  font-weight: 600;
+}
+
+.stat-danger .ant-statistic-content {
+  color: #cf1322;
+}
+
+.stat-warning .ant-statistic-content {
+  color: #fa8c16;
+}
+
+.stat-success .ant-statistic-content {
+  color: #52c41a;
+}
+
+.quick-start-card {
+  margin-top: 24px;
+}
+
+.quick-start-card .ant-typography {
+  font-size: 15px;
+}

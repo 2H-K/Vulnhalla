@@ -1,0 +1,38 @@
+/* 页面通用样式 */
+.projects-page,
+.results-page,
+.settings-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.page-header {
+  margin-bottom: 24px;
+}
+
+.page-header .ant-typography {
+  margin-bottom: 8px !important;
+}
+
+.page-header .ant-typography:last-child {
+  margin-bottom: 0 !important;
+}
+
+.page-subtitle {
+  font-size: 14px;
+}
+
+.coming-soon-card {
+  min-height: 400px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.coming-soon-card .ant-empty {
+  padding: 48px 0;
+}
+
+.coming-soon-card .ant-empty-description .ant-typography {
+  margin-bottom: 0;
+}
