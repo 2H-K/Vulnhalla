@@ -1,10 +1,13 @@
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, Typography, theme } from 'antd';
+import { Layout, Menu, Typography } from 'antd';
 import {
   DashboardOutlined,
   FolderOutlined,
   FileSearchOutlined,
   SettingOutlined,
+  CodeOutlined,
+  RobotOutlined,
+  SafetyOutlined,
 } from '@ant-design/icons';
 import './MainLayout.css';
 
@@ -23,9 +26,31 @@ const menuItems = [
     label: '项目管理',
   },
   {
+    key: '/vulnerabilities',
+    icon: <SafetyOutlined />,
+    label: '漏洞列表',
+  },
+  {
     key: '/results',
     icon: <FileSearchOutlined />,
     label: '分析结果',
+  },
+  {
+    key: 'codeql',
+    icon: <CodeOutlined />,
+    label: 'CodeQL',
+    children: [
+      {
+        key: '/codeql/packages',
+        icon: <CodeOutlined />,
+        label: '包管理',
+      },
+      {
+        key: '/codeql/generator',
+        icon: <RobotOutlined />,
+        label: 'LLM生成查询',
+      },
+    ],
   },
   {
     key: '/settings',
@@ -37,10 +62,27 @@ const menuItems = [
 const MainLayout = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { token } = theme.useToken();
 
   const handleMenuClick = ({ key }: { key: string }) => {
     navigate(key);
+  };
+
+  // 获取当前选中的菜单项
+  const getSelectedKeys = () => {
+    const path = location.pathname;
+    if (path.startsWith('/codeql/')) {
+      return [path];
+    }
+    return [path];
+  };
+
+  // 获取展开的菜单项
+  const getOpenKeys = () => {
+    const path = location.pathname;
+    if (path.startsWith('/codeql/')) {
+      return ['codeql'];
+    }
+    return [];
   };
 
   return (
@@ -60,7 +102,8 @@ const MainLayout = () => {
         <Menu
           theme="dark"
           mode="inline"
-          selectedKeys={[location.pathname]}
+          selectedKeys={getSelectedKeys()}
+          defaultOpenKeys={getOpenKeys()}
           items={menuItems}
           onClick={handleMenuClick}
         />
