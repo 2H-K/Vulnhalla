@@ -583,3 +583,290 @@ class CodeQLDBLookup:
             Dictionary with cache statistics (total_entries, hit_rate, etc.).
         """
         return self.cache_manager.get_stats()
+
+    # ============================================================================
+    # Phase 1: Enhanced Agent Tools
+    # ============================================================================
+
+    def search_code_pattern(
+        self,
+        db_path: str,
+        pattern: str,
+        file_filter: Optional[str] = None,
+        max_results: int = 10
+    ) -> Union[str, List[Dict[str, Any]]]:
+        """
+        Search for code patterns using regex in the source archive.
+
+        Args:
+            db_path: Path to the CodeQL database folder.
+            pattern: Regex pattern to search for.
+            file_filter: Optional file filter (e.g., '*.c', '*.java').
+            max_results: Maximum number of results to return.
+
+        Returns:
+            Union[str, List[Dict]]: List of matches with file, line, and snippet,
+                                   or error message string if nothing found.
+        """
+        import re
+
+        src_zip = Path(db_path) / "src.zip"
+        if not src_zip.exists():
+            return "Source archive not found in database."
+
+        import zipfile
+        matches = []
+
+        try:
+            with zipfile.ZipFile(str(src_zip), 'r') as zf:
+                file_list = zf.namelist()
+
+                # Apply file filter if provided
+                if file_filter:
+                    import fnmatch
+                    file_list = [f for f in file_list if fnmatch.fnmatch(f, file_filter)]
+
+                for file_path in file_list:
+                    if not file_path.endswith(('.c', '.cpp', '.h', '.java', '.js', '.ts', '.py', '.go', '.cs')):
+                        continue
+
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                        lines = content.split('\n')
+
+                        for line_num, line in enumerate(lines, 1):
+                            if re.search(pattern, line):
+                                # Get context (3 lines before and after)
+                                start_ctx = max(0, line_num - 4)
+                                end_ctx = min(len(lines), line_num + 3)
+                                context = '\n'.join(f"{i}: {lines[i-1]}" for i in range(start_ctx + 1, end_ctx + 1))
+
+                                matches.append({
+                                    'file': file_path,
+                                    'line': line_num,
+                                    'match': line.strip(),
+                                    'context': context
+                                })
+
+                                if len(matches) >= max_results:
+                                    break
+
+                    except Exception:
+                        continue
+
+                    if len(matches) >= max_results:
+                        break
+
+        except zipfile.BadZipFile:
+            return "Invalid ZIP archive in database."
+        except Exception as e:
+            return f"Error searching code: {str(e)}"
+
+        if not matches:
+            return f"No matches found for pattern: {pattern}"
+
+        return matches
+
+    def get_callee_functions(
+        self,
+        function_tree_file: str,
+        current_function: Dict[str, str]
+    ) -> Union[str, List[Dict[str, str]]]:
+        """
+        Get the list of functions that are called by the current function.
+
+        Args:
+            function_tree_file: Path to FunctionTree.csv.
+            current_function: The function dictionary.
+
+        Returns:
+            Union[str, List[Dict]]: List of callee functions or error message.
+        """
+        keys = ["function_name", "file_path", "start_line", "end_line", "function_id", "caller_ids"]
+
+        # Get the function_id to find callees
+        current_func_id = current_function.get("function_id", "")
+        if not current_func_id:
+            return "Current function has no function_id."
+
+        callees = []
+
+        try:
+            with Path(function_tree_file).open("r", encoding="utf-8") as f:
+                while True:
+                    row = f.readline()
+                    if not row:
+                        break
+
+                    # Check if this function is called by current function
+                    # by searching for current_func_id in the row
+                    if current_func_id in row:
+                        row_dict = parse_csv_row(row, keys)
+                        row_dict = self._normalize_function_tree_row(row_dict)
+                        if not row_dict:
+                            continue
+
+                        # Check if it's actually a callee (not the function itself)
+                        if row_dict.get("function_id") != current_func_id:
+                            row_dict["file"] = row_dict.get("file_path", "")
+                            callees.append(row_dict)
+
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            return f"Error reading function tree: {str(e)}"
+
+        if not callees:
+            # Try alternative approach: search for function calls in the code
+            return "No direct callees found in function tree. Try analyzing the source code directly."
+
+        return callees[:10]  # Limit to top 10
+
+    def analyze_data_flow(
+        self,
+        db_path: str,
+        function_tree_file: str,
+        variable_name: str,
+        current_function: Dict[str, str],
+        max_depth: int = 3
+    ) -> Union[str, Dict[str, Any]]:
+        """
+        Analyze the data flow of a variable within a function.
+
+        Args:
+            db_path: Path to the CodeQL database folder.
+            function_tree_file: Path to FunctionTree.csv.
+            variable_name: Name of the variable to trace.
+            current_function: The function dictionary.
+            max_depth: Maximum depth to trace.
+
+        Returns:
+            Union[str, Dict]: Data flow analysis results or error message.
+        """
+        # This is a simplified implementation
+        # Full implementation would require CodeQL data flow queries
+
+        src_zip = Path(db_path) / "src.zip"
+        if not src_zip.exists():
+            return "Source archive not found."
+
+        # Extract the function code
+        try:
+            file_path, start_line, end_line, lines = self.extract_function_lines_from_db(
+                db_path, current_function, max_chars=50000
+            )
+
+            function_code = '\n'.join(lines[start_line-1:end_line])
+
+            # Simple analysis: find variable definitions and usages
+            import re
+
+            # Find variable declarations/definitions
+            var_definitions = []
+            var_usages = []
+
+            for line_num, line in enumerate(lines[start_line-1:end_line], start=start_line):
+                # Check for assignment (definition)
+                if re.search(rf'\b{variable_name}\s*=', line):
+                    var_definitions.append({
+                        'line': line_num,
+                        'code': line.strip()
+                    })
+                # Check for usage
+                if re.search(rf'\b{variable_name}\b', line):
+                    var_usages.append({
+                        'line': line_num,
+                        'code': line.strip()
+                    })
+
+            return {
+                'variable': variable_name,
+                'function': current_function.get('function_name', 'unknown'),
+                'definitions': var_definitions,
+                'usages': var_usages,
+                'note': 'This is a static analysis. For full data flow, use CodeQL SARIF output.'
+            }
+
+        except Exception as e:
+            return f"Error analyzing data flow: {str(e)}"
+
+    def get_file_dependencies(
+        self,
+        db_path: str,
+        file_path: str
+    ) -> Union[str, List[str]]:
+        """
+        Get the list of files that the given file depends on (imports/includes).
+
+        Args:
+            db_path: Path to the CodeQL database folder.
+            file_path: Path to the file (relative to source root).
+
+        Returns:
+            Union[str, List[str]]: List of dependencies or error message.
+        """
+        src_zip = Path(db_path) / "src.zip"
+        if not src_zip.exists():
+            return "Source archive not found."
+
+        import zipfile
+        import re
+
+        try:
+            with zipfile.ZipFile(str(src_zip), 'r') as zf:
+                # Normalize the file path for ZIP
+                normalized_path = file_path.replace('\\', '/')
+
+                try:
+                    content = zf.read(normalized_path).decode('utf-8', errors='ignore')
+                except KeyError:
+                    # Try alternative path formats
+                    alt_paths = [
+                        normalized_path.lstrip('/'),
+                        normalized_path.replace('/', '\\'),
+                    ]
+                    content = None
+                    for alt in alt_paths:
+                        try:
+                            content = zf.read(alt).decode('utf-8', errors='ignore')
+                            normalized_path = alt
+                            break
+                        except KeyError:
+                            continue
+
+                    if content is None:
+                        return f"File not found in archive: {file_path}"
+
+                # Extract includes/imports based on language
+                dependencies = []
+
+                # C/C++ #include
+                for match in re.finditer(r'#include\s*[<\"]([^>\"]+)[>\"]', content):
+                    dependencies.append({
+                        'type': 'include',
+                        'target': match.group(1)
+                    })
+
+                # Java import
+                for match in re.finditer(r'import\s+([\w.]+);', content):
+                    dependencies.append({
+                        'type': 'import',
+                        'target': match.group(1)
+                    })
+
+                # JavaScript/TypeScript import/require
+                for match in re.finditer(r'(?:import|require)\s*[(|\']?([\w.@/-]+)', content):
+                    deps = match.group(1)
+                    if not deps.startswith('.'):
+                        dependencies.append({
+                            'type': 'module',
+                            'target': deps
+                        })
+
+                if not dependencies:
+                    return "No dependencies found in file."
+
+                return dependencies[:20]  # Limit
+
+        except zipfile.BadZipFile:
+            return "Invalid ZIP archive."
+        except Exception as e:
+            return f"Error analyzing dependencies: {str(e)}"

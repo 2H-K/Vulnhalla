@@ -72,3 +72,5 @@ cache/
 .codeql/
 *.qlx
 codeql-pack.lock.yml
+
+plans

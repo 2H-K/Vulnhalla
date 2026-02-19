@@ -11,7 +11,6 @@ Supported modes:
 - Local mode: Analyze existing local databases
 """
 import sys
-import argparse
 from pathlib import Path
 from typing import Optional, List
 import argparse
@@ -23,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.codeql.fetch_repos import fetch_codeql_dbs
 from src.codeql.run_codeql_queries import compile_and_run_codeql_queries
+from src.codeql.sarif_parser import SarifParser
 from src.utils.config import get_codeql_path
 from src.utils.config_validator import validate_and_exit_on_error
 from src.utils.logger import setup_logging, get_logger
@@ -31,22 +31,26 @@ from src.utils.exceptions import (
     LLMError, LLMConfigError, LLMApiError,
     VulnhallaError
 )
+from src.utils.constants import (
+    EXIT_CODE_SUCCESS,
+    EXIT_CODE_GENERAL_ERROR,
+    EXIT_CODE_CONFIG_ERROR,
+    EXIT_CODE_CODEQL_ERROR,
+    EXIT_CODE_LLM_ERROR,
+    EXIT_CODE_FILE_ERROR,
+)
 from src.vulnhalla import IssueAnalyzer
-from src.utils.cache_manager import CacheManager
 
 # Initialize logging
 setup_logging()
 logger = get_logger(__name__)
 
-# Initialize cache manager
-cache_manager = CacheManager()
-
 
 # Language mapping: external language names to internal CodeQL language codes
 LANGUAGE_MAPPING = {
     "c": "c",
-    "cpp": "c",
-    "c++": "c",
+    "cpp": "cpp",
+    "c++": "cpp",
     "java": "java",
     "javascript": "javascript",
     "js": "javascript",
@@ -60,7 +64,7 @@ LANGUAGE_MAPPING = {
 }
 
 # Supported languages (for validation)
-SUPPORTED_LANGUAGES = ["c", "java", "javascript", "python", "go", "ruby", "csharp", "typescript"]
+SUPPORTED_LANGUAGES = ["c", "cpp", "java", "javascript", "python", "go", "ruby", "csharp", "typescript"]
 
 
 def normalize_language(lang: str) -> str:
@@ -158,12 +162,11 @@ def _log_exception_cause(e: Exception) -> None:
             logger.error(f"   Cause: {cause}")
 
 
-def analyze_pipeline(repo: Optional[str] = None, lang: str = "c", threads: int = 16, open_ui: bool = True, use_local_db: bool = False, db_dir: Optional[str] = None) -> None:
+def analyze_pipeline(repo: Optional[str] = None, lang: str = "c", threads: int = 16, open_ui: bool = True, use_local_db: bool = False, db_dir: Optional[str] = None, sarif_file: Optional[str] = None) -> None:
     """
     Run the complete Vulnhalla pipeline: fetch, analyze, classify, and optionally open UI.
 
     Args:
-        mode: Analysis mode - "remote" (fetch from GitHub) or "local" (use existing databases)
         repo: Optional GitHub repository name (e.g., "redis/redis"). Only used in remote mode.
         lang: Programming language code. Defaults to "c".
         db_path: Optional custom database path for local mode.
@@ -171,25 +174,34 @@ def analyze_pipeline(repo: Optional[str] = None, lang: str = "c", threads: int =
         open_ui: Whether to open the UI after completion. Defaults to True.
         use_local_db: Whether to use local databases instead of fetching. Defaults to False.
         db_dir: Database directory name when using local databases. Defaults to None.
+        sarif_file: Optional path to SARIF file for analysis. If provided, uses SARIF data flow paths.
 
     Note:
         This function catches and handles all exceptions internally, logging errors
         and exiting with code 1 on failure. It does not raise exceptions.
     """
+    # Check if SARIF mode is enabled
+    sarif_mode = sarif_file is not None
+    
     # Normalize language
     try:
         lang = normalize_language(lang)
     except ValueError as e:
         logger.error(f"❌ {e}")
-        sys.exit(1)
+        sys.exit(EXIT_CODE_CONFIG_ERROR)
     
     mode = "local" if use_local_db else "remote"
+    if sarif_mode:
+        mode = "sarif"
+    
     db_path = str(Path("output/databases") / lang / db_dir) if use_local_db and db_dir else None
 
     logger.info("🚀 Starting Vulnhalla Analysis Pipeline")
     logger.info("=" * 60)
     logger.info(f"Mode: {mode.upper()}")
     logger.info(f"Language: {lang}")
+    if sarif_file:
+        logger.info(f"SARIF file: {sarif_file}")
     if db_path:
         logger.info(f"Database path: {db_path}")
     
@@ -210,7 +222,32 @@ See README.md for configuration reference.
         _log_exception_cause(e)
         sys.exit(1)
     
-    if not use_local_db:
+    # Initialize SARIF data (for SARIF mode)
+    flow_paths = None
+    
+    if sarif_mode:
+        # SARIF mode: Skip database fetch and query, directly parse SARIF
+        logger.info("\n[1/4] Loading SARIF File")
+        logger.info("-" * 60)
+        if not Path(sarif_file).exists():
+            logger.error(f"❌ SARIF file not found: {sarif_file}")
+            sys.exit(1)
+        logger.info(f"Loading SARIF file: {sarif_file}")
+        
+        try:
+            from src.codeql.sarif_parser import SarifParser
+            sarif_parser = SarifParser(sarif_file)
+            sarif_parser.load_sarif(sarif_file)
+            flow_paths = sarif_parser.parse_results()
+            logger.info(f"Loaded {len(flow_paths)} issues from SARIF")
+        except Exception as e:
+            logger.error(f"❌ Error loading SARIF file: {e}")
+            sys.exit(1)
+        
+        # Skip CodeQL query step in SARIF mode
+        logger.info("\n[2/4] Skipping CodeQL Query (SARIF mode)")
+        logger.info("-" * 60)
+    elif not use_local_db:
         try:
             # Step 1: Fetch CodeQL databases
             logger.info("\n[1/4] Fetching CodeQL Databases")
@@ -247,36 +284,37 @@ See README.md for configuration reference.
             logger.error("❌ Local database mode requires specifying a database directory.")
             sys.exit(1)
 
-    try:
-        # Step 2: Run CodeQL queries
-        logger.info("\n[2/3] Running CodeQL Queries")
-        logger.info("-" * 60)
-        compile_and_run_codeql_queries(
-            codeql_bin=get_codeql_path(),
-            lang=lang,
-            threads=threads,
-            timeout=300
-        )
-    except CodeQLConfigError as e:
-        logger.error(f"❌ Configuration error while running CodeQL queries: {e}")
-        _log_exception_cause(e)
-        logger.error("   Please check your CODEQL_PATH configuration.")
-        sys.exit(1)
-    except CodeQLExecutionError as e:
-        logger.error(f"❌ Failed to execute CodeQL queries: {e}")
-        _log_exception_cause(e)
-        logger.error("   Please check your CodeQL installation and database files.")
-        sys.exit(1)
-    except CodeQLError as e:
-        logger.error(f"❌ CodeQL error: {e}")
-        _log_exception_cause(e)
-        sys.exit(1)
+    if not sarif_mode:
+        try:
+            # Step 2: Run CodeQL queries
+            logger.info("\n[2/3] Running CodeQL Queries")
+            logger.info("-" * 60)
+            compile_and_run_codeql_queries(
+                codeql_bin=get_codeql_path(),
+                lang=lang,
+                threads=threads,
+                timeout=300
+            )
+        except CodeQLConfigError as e:
+            logger.error(f"❌ Configuration error while running CodeQL queries: {e}")
+            _log_exception_cause(e)
+            logger.error("   Please check your CODEQL_PATH configuration.")
+            sys.exit(1)
+        except CodeQLExecutionError as e:
+            logger.error(f"❌ Failed to execute CodeQL queries: {e}")
+            _log_exception_cause(e)
+            logger.error("   Please check your CodeQL installation and database files.")
+            sys.exit(1)
+        except CodeQLError as e:
+            logger.error(f"❌ CodeQL error: {e}")
+            _log_exception_cause(e)
+            sys.exit(1)
     
     try:
         # Step 3: Classify results with LLM
         logger.info("\n[3/3] Classifying Results with LLM")
         logger.info("-" * 60)
-        analyzer = IssueAnalyzer(lang=lang, db_dir=db_dir if use_local_db else None)
+        analyzer = IssueAnalyzer(lang=lang, db_dir=db_dir if use_local_db else None, sarif_data=flow_paths)
         analyzer.run()
     except LLMConfigError as e:
         logger.error(f"❌ LLM configuration error: {e}")

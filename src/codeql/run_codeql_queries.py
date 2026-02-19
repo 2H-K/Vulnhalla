@@ -159,8 +159,9 @@ def run_one_query(
         CodeQLExecutionError: If query execution or BQRS decoding fails.
     """
     # Run the query
+    # NOTE: Capture stdout/stderr to diagnose errors properly
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 codeql_bin, "query", "run", query_file,
                 f'--database={curr_db}',
@@ -169,8 +170,8 @@ def run_one_query(
             ],
             check=True,
             text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
         )
     except FileNotFoundError as e:
         raise CodeQLConfigError(
@@ -178,28 +179,38 @@ def run_one_query(
             "Please check your CODEQL_PATH configuration."
         ) from e
     except subprocess.CalledProcessError as e:
-        raise CodeQLExecutionError(
-            f"Failed to run query {query_file} on database {curr_db}: "
-            f"CodeQL returned exit code {e.returncode}"
-        ) from e
+        # Log the captured output for debugging
+        stdout_output = result.stdout if hasattr(result, 'stdout') else ''
+        stderr_output = result.stderr if hasattr(result, 'stderr') else ''
+        error_msg = f"Failed to run query {query_file} on database {curr_db}: CodeQL returned exit code {e.returncode}"
+        if stdout_output:
+            error_msg += f"\nStdout: {stdout_output}"
+        if stderr_output:
+            error_msg += f"\nStderr: {stderr_output}"
+        raise CodeQLExecutionError(error_msg) from e
 
     # Decode BQRS to CSV
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 codeql_bin, "bqrs", "decode", output_bqrs,
                 '--format=csv', f'--output={output_csv}'
             ],
             check=True,
             text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
         )
     except subprocess.CalledProcessError as e:
-        raise CodeQLExecutionError(
-            f"Failed to decode BQRS file {output_bqrs} to CSV: "
-            f"CodeQL returned exit code {e.returncode}"
-        ) from e
+        # Log the captured output for debugging
+        stdout_output = result.stdout if hasattr(result, 'stdout') else ''
+        stderr_output = result.stderr if hasattr(result, 'stderr') else ''
+        error_msg = f"Failed to decode BQRS file {output_bqrs} to CSV: CodeQL returned exit code {e.returncode}"
+        if stdout_output:
+            error_msg += f"\nStdout: {stdout_output}"
+        if stderr_output:
+            error_msg += f"\nStderr: {stderr_output}"
+        raise CodeQLExecutionError(error_msg) from e
 
 
 def run_queries_on_db(
@@ -247,23 +258,27 @@ def run_queries_on_db(
     # 2) Run the entire queries folder in one go (bulk analysis)
     queries_folder_path = Path(queries_folder)
     if queries_folder_path.is_dir():
+        # DEBUG: Log the command being executed
+        debug_cmd = [
+            codeql_bin,
+            "database",
+            "analyze",
+            curr_db,
+            queries_folder,
+            f'--timeout={timeout}',
+            '--format=csv',
+            f'--output={str(Path(curr_db) / "issues.csv")}',
+            f'--threads={threads}'
+        ]
+        logger.debug(f"Running CodeQL analyze command: {' '.join(debug_cmd)}")
+        
         try:
-            subprocess.run(
-                [
-                    codeql_bin,
-                    "database",
-                    "analyze",
-                    curr_db,
-                    queries_folder,
-                    f'--timeout={timeout}',
-                    '--format=csv',
-                    f'--output={str(Path(curr_db) / "issues.csv")}',
-                    f'--threads={threads}'
-                ],
+            result = subprocess.run(
+                debug_cmd,
                 check=True,
                 text=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
             )
         except FileNotFoundError as e:
             raise CodeQLConfigError(
@@ -271,10 +286,15 @@ def run_queries_on_db(
                 "Please check your CODEQL_PATH configuration."
             ) from e
         except subprocess.CalledProcessError as e:
-            raise CodeQLExecutionError(
-                f"Failed to analyze database {curr_db} with queries from {queries_folder}: "
-                f"CodeQL returned exit code {e.returncode}"
-            ) from e
+            # Log the captured output for debugging
+            stdout_output = result.stdout if hasattr(result, 'stdout') else ''
+            stderr_output = result.stderr if hasattr(result, 'stderr') else ''
+            error_msg = f"Failed to analyze database {curr_db} with queries from {queries_folder}: CodeQL returned exit code {e.returncode}"
+            if stdout_output:
+                error_msg += f"\nStdout: {stdout_output}"
+            if stderr_output:
+                error_msg += f"\nStderr: {stderr_output}"
+            raise CodeQLExecutionError(error_msg) from e
     else:
         logger.warning(f"Queries folder '{queries_folder}' not found. Skipping bulk analysis.")
 
@@ -389,6 +409,11 @@ def compile_and_run_codeql_queries(
     
     for curr_db in dbs_path:
         logger.info(f"处理数据库: {curr_db}")
+        
+        # DEBUG: Log database path and check for required files
+        logger.debug(f"Database path: {curr_db}")
+        logger.debug(f"Tools folder: {tools_folder}")
+        logger.debug(f"Queries folder: {queries_folder}")
         
         # Check if database folder is empty
         curr_db_path = Path(curr_db)

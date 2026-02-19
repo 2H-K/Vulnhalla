@@ -7,3 +7,6 @@ pytest
 loguru
 jsbeautifier
 ijson
+fastapi
+celery
+tiktoken

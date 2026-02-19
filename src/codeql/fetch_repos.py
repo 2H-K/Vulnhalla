@@ -498,6 +498,24 @@ def download_and_extract_db(repo: Dict[str, Any], threads: int, extract_folder: 
         CodeQLConfigError: On 4xx client errors during download (e.g., invalid token).
     """
     org_name, repo_name = repo["repo_name"].split("/")
+    
+    # Check if database already exists (skip download if it does)
+    db_path = Path(extract_folder) / repo_name
+    target_path = db_path / repo_name  # Final expected path: output/databases/{lang}/{repo_name}/{repo_name}
+    
+    if target_path.exists() and (target_path / "codeql-database.yml").exists():
+        logger.info(f"Database for {org_name}/{repo_name} already exists at {target_path}. Skipping download.")
+        return
+    
+    # Also check if db_path exists but target_path doesn't (incomplete extraction)
+    if db_path.exists() and not target_path.exists():
+        logger.warning(f"Incomplete database found for {org_name}/{repo_name}. Removing and re-downloading...")
+        try:
+            import shutil
+            shutil.rmtree(str(db_path))
+        except Exception as e:
+            logger.warning(f"Failed to remove incomplete database: {e}")
+    
     logger.info(f"Downloading repo {org_name}/{repo_name}")
     zip_path = multi_thread_db_download(repo["db_url"], repo_name, threads)
 
@@ -550,13 +568,25 @@ def download_db_by_name(repo_name: str, lang: str, threads: int) -> None:
         If no database is found for the specified language, a warning is logged
         and the function returns without raising an error.
     """
+    # Check if database already exists (skip download if it does)
+    extract_folder = str(Path("output/databases") / lang)
+    org_name = repo_name.split("/")[0] if "/" in repo_name else ""
+    repo_short_name = repo_name.split("/")[1] if "/" in repo_name else repo_name
+    
+    db_path = Path(extract_folder) / repo_short_name
+    target_path = db_path / repo_short_name
+    
+    if target_path.exists() and (target_path / "codeql-database.yml").exists():
+        logger.info(f"Database for {repo_name} already exists at {target_path}. Skipping download.")
+        return
+    
     # Build a minimal repo dict to be processed
     repo = {"stars": 0, "forks": 0, "repo_name": repo_name, "html_url": ""}
     repo_db = filter_repos_by_db_and_lang([repo], lang)
     if not repo_db:
         logger.warning(f"No {lang} DB found for {repo_name}")
         return
-    download_and_extract_db(repo_db[0], threads, str(Path("output/databases") / lang))
+    download_and_extract_db(repo_db[0], threads, extract_folder)
 
 
 def fetch_codeql_dbs(
@@ -615,6 +645,14 @@ def fetch_codeql_dbs(
     write_file_text(backup_file, json.dumps(repos_db))
 
     for i, repo_info in enumerate(repos_db):
+        repo_name = repo_info['repo_name']
+        
+        # Check if database already exists before attempting download
+        target_path = Path(db_folder) / repo_name.split("/")[1] / repo_name.split("/")[1]
+        if target_path.exists() and (target_path / "codeql-database.yml").exists():
+            logger.info(f"Database for {repo_name} already exists. Skipping download.")
+            continue
+            
         logger.info(f"Downloading repo {i + 1}/{len(repos_db)}: {repo_info['repo_name']}")
         download_and_extract_db(repo_info, threads, db_folder)
 

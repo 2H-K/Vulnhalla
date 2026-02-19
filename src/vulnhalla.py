@@ -44,8 +44,26 @@ from src.llm.strategies.factory import get_strategy
 from src.utils.config_validator import validate_and_exit_on_error
 from src.utils.logger import get_logger
 from src.utils.exceptions import VulnhallaError, CodeQLError, LLMApiError
+from src.utils.constants import (
+    STATUS_TRUE_POSITIVE,
+    STATUS_FALSE_POSITIVE,
+    STATUS_NEED_MORE_DATA,
+    ISSUE_CLASSIFICATION_TRUE,
+    ISSUE_CLASSIFICATION_FALSE,
+    ISSUE_CLASSIFICATION_MORE,
+    RECOGNIZED_STATUS_CODES,
+)
 
 logger = get_logger(__name__)
+
+# Try to import tiktoken for accurate token estimation
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+    logger.warning("tiktoken not installed. Token estimation may be less accurate for non-English text.")
+
 # For JS beautification
 try:
     import jsbeautifier
@@ -75,7 +93,7 @@ class IssueAnalyzer:
     and forwards them to an LLM (via llm_analyzer) for triage.
     """
 
-    def __init__(self, lang: str = "c", config: Optional[Dict[str, Any]] = None, db_dir: Optional[str] = None) -> None:
+    def __init__(self, lang: str = "c", config: Optional[Dict[str, Any]] = None, db_dir: Optional[str] = None, sarif_data: Optional[List[Any]] = None) -> None:
         """
         Initialize the IssueAnalyzer with default parameters.
 
@@ -83,12 +101,15 @@ class IssueAnalyzer:
             lang (str, optional): The language code. Defaults to 'c'.
             config (Dict, optional): Full LLM configuration dictionary. If not provided, loads from .env file.
             db_dir (str, optional): Specific database directory to analyze. If None, analyzes all in the language folder.
+            sarif_data (List, optional): Pre-parsed SARIF data flow paths. If provided, uses SARIF mode.
         """
         self.lang = lang
         self.db_path: Optional[str] = None
         self.code_path: Optional[str] = None
         self.config = config
         self.db_dir = db_dir
+        self.sarif_data = sarif_data
+        self.sarif_mode = sarif_data is not None and len(sarif_data) > 0
         
         # Initialize language strategy for token management and language-specific handling
         self.strategy = get_strategy(lang, config=config)
@@ -260,6 +281,38 @@ class IssueAnalyzer:
 
         return best_function
 
+    def _estimate_tokens(self, text: str) -> int:
+        """
+        Estimate the number of tokens in the given text.
+        
+        Uses tiktoken for accurate estimation if available, otherwise falls back
+        to a simple character-based estimation.
+        
+        Args:
+            text: The text to estimate tokens for.
+            
+        Returns:
+            Estimated number of tokens.
+        """
+        if TIKTOKEN_AVAILABLE:
+            try:
+                # Use cl100k_base encoding (used by GPT-3.5 and GPT-4)
+                encoding = tiktoken.get_encoding("cl100k_base")
+                return len(encoding.encode(text))
+            except Exception as e:
+                logger.warning(f"tiktoken encoding failed: {e}, falling back to character estimation")
+        
+        # Fallback: Estimate based on character count
+        # This is less accurate, especially for non-English text
+        # English: ~1 token per 4 characters
+        # Chinese: ~1 token per 1.5 characters
+        # Mixed content: use weighted average
+        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+        other_chars = len(text) - chinese_chars
+        
+        # Weighted estimation: Chinese tokens ≈ chars/1.5, English tokens ≈ chars/4
+        return int(chinese_chars / 1.5) + int(other_chars / 4)
+
     def extract_function_code(self, code_file: List[str], function_dict: Dict[str, str], max_chars: int = 5000) -> str:
         """
         Produces lines of the function's code from a list of lines, limited to max_chars.
@@ -390,7 +443,13 @@ class IssueAnalyzer:
             VulnhallaError: If template files cannot be read (not found, permission denied, etc.).
         """
         # If language is 'c', many queries are stored under 'cpp'
-        lang_folder = "cpp" if self.lang == "c" else self.lang
+        # Also handle 'cpp' language properly
+        if self.lang == "c":
+            lang_folder = "cpp"
+        elif self.lang == "cpp":
+            lang_folder = "cpp"
+        else:
+            lang_folder = self.lang
 
         # Try to read an existing template specific to the issue name
         templates_base = Path("data/templates") / lang_folder
@@ -513,12 +572,12 @@ class IssueAnalyzer:
             str: "true" if content has '1337', "false" if content has '1007',
                  otherwise "more".
         """
-        if "1337" in llm_content:
-            return "true"
-        elif "1007" in llm_content:
-            return "false"
+        if STATUS_TRUE_POSITIVE in llm_content:
+            return ISSUE_CLASSIFICATION_TRUE
+        elif STATUS_FALSE_POSITIVE in llm_content:
+            return ISSUE_CLASSIFICATION_FALSE
         else:
-            return "more"
+            return ISSUE_CLASSIFICATION_MORE
 
     def append_extra_functions(
         self,
@@ -610,12 +669,6 @@ class IssueAnalyzer:
         """
         处理漏洞，带有详细路径自愈追踪日志。
         """
-        # --- 强行重置日志配置，确保 DEBUG 必出 ---
-        import sys
-        from loguru import logger
-        logger.remove()  # 移除之前所有的 handler (包括那个带 filter 的)
-        logger.add(sys.stdout, level="DEBUG", format="<level>{level: <8}</level> | <cyan>{name}:{function}:{line}</cyan> - <level>{message}</level>")
-        
         results_folder = Path("output/results") / self.lang / issue_type.replace(" ", "_").replace("/", "-")
         self.ensure_directories_exist([str(results_folder)])
 
@@ -633,6 +686,14 @@ class IssueAnalyzer:
             # Check if it's a static resource - skip LLM analysis
             if self.strategy.should_skip_file(issue["file"]):
                 logger.info(f"Issue {issue_id}: Skipped static resource -> false")
+                false_issues.append(issue_id)
+                continue
+            
+            # Skip files that are too large (like minified/bundled JS files)
+            # These typically have >5000 lines and will exceed context limits
+            file_path_check = issue["file"].lower()
+            if any(pattern in file_path_check for pattern in ['/pdfjs/', '/pdf.js/', 'viewer.js', '.min.js', '.bundle.js']):
+                logger.info(f"Issue {issue_id}: Skipped large/third-party file -> false")
                 false_issues.append(issue_id)
                 continue
 
@@ -751,7 +812,7 @@ class IssueAnalyzer:
 
             # Token 熔断器硬上限拦截
             MAX_TOKENS_HARD_LIMIT = 100000  # 硬上限：10万 tokens
-            estimated_tokens = len(prompt) // 4  # 粗略估计：1 token ≈ 4 characters
+            estimated_tokens = self._estimate_tokens(prompt)
             if estimated_tokens > MAX_TOKENS_HARD_LIMIT:
                 logger.error(f"❌ Token 熔断器触发: prompt ({estimated_tokens} tokens) 超过硬上限 {MAX_TOKENS_HARD_LIMIT}")
                 false_issues.append(issue_id)
@@ -765,7 +826,8 @@ class IssueAnalyzer:
             # 发送请求
             try:
                 messages, content = llm_analyzer.run_llm_security_analysis(
-                    prompt, function_tree_file, current_function, [current_function], self.db_path
+                    prompt, function_tree_file, current_function, [current_function], self.db_path,
+                    issue=issue
                 )
                 
                 gpt_result = self.format_llm_messages(messages)
@@ -780,7 +842,6 @@ class IssueAnalyzer:
             except LLMApiError as e:
                 logger.warning(f"Issue ID: {issue_id} SKIPPED - LLM error: {e}")
                 skipped_issues.append(issue_id)
-                issue_id += 1
                 continue
             except Exception as e:
                 logger.error(f"LLM Call Failed for Issue {issue_id}: {str(e)}")
@@ -810,6 +871,13 @@ class IssueAnalyzer:
         llm_analyzer = LLMAnalyzer()
         llm_analyzer.init_llm_client(config=self.config)
 
+        # SARIF mode: Use pre-parsed SARIF data
+        if self.sarif_mode:
+            logger.info("Running in SARIF mode with pre-parsed data flow paths")
+            self._run_sarif_analysis(llm_analyzer)
+            return
+        
+        # Normal mode: Use CSV files
         dbs_folder = str(Path("output/databases") / self.lang)
 
         # Gather issues from DBs
@@ -859,6 +927,120 @@ class IssueAnalyzer:
         # Process all issues, type by type
         for issue_type in issues_statistics.keys():
             self.process_issue_type(issue_type, issues_statistics[issue_type], llm_analyzer)
+
+    def _run_sarif_analysis(self, llm_analyzer: LLMAnalyzer) -> None:
+        """
+        Run analysis using pre-parsed SARIF data flow paths.
+        
+        Args:
+            llm_analyzer: Initialized LLM analyzer instance.
+        """
+        from src.codeql.sarif_parser import SarifPathEnricher
+        
+        logger.info(f"Processing {len(self.sarif_data)} SARIF data flow paths")
+        
+        # Group by rule
+        issues_by_rule: Dict[str, List[Any]] = {}
+        for flow_path in self.sarif_data:
+            rule_name = flow_path.rule_name
+            if rule_name not in issues_by_rule:
+                issues_by_rule[rule_name] = []
+            issues_by_rule[rule_name].append(flow_path)
+        
+        # Process each rule
+        for rule_name, flow_paths in issues_by_rule.items():
+            logger.info(f"Processing SARIF rule: {rule_name} ({len(flow_paths)} issues)")
+            
+            results_folder = Path("output/results") / self.lang / rule_name.replace(" ", "_").replace("/", "-")
+            self.ensure_directories_exist([str(results_folder)])
+            
+            for idx, flow_path in enumerate(flow_paths, 1):
+                # Create issue dict from flow path
+                issue = {
+                    'name': flow_path.rule_name,
+                    'message': flow_path.message,
+                    'file': flow_path.steps[0].location.file_path if flow_path.steps else 'unknown',
+                    'start_line': str(flow_path.steps[0].location.start_line) if flow_path.steps else '0',
+                    'help': flow_path.rule_name,
+                    'type': flow_path.severity
+                }
+                
+                # Get data flow prompt section
+                flow_prompt = SarifPathEnricher.create_flow_prompt_section(flow_path, include_code=True)
+                
+                # Build enhanced prompt with data flow information
+                prompt = self._build_sarif_prompt(issue, flow_prompt)
+                
+                logger.info(f"SARIF Issue {idx}: {rule_name} - {flow_path.get_summary()}")
+                
+                try:
+                    # Run LLM analysis with SARIF data
+                    messages, content = llm_analyzer.run_llm_security_analysis(
+                        prompt, "", {}, [], "", issue=issue
+                    )
+                    
+                    # Save results
+                    gpt_result = self.format_llm_messages(messages)
+                    write_file_ascii(str(Path(results_folder) / f"{idx}_final.json"), gpt_result)
+                    
+                    status = self.determine_issue_status(content)
+                    logger.info(f"SARIF Issue {idx}: Analysis complete -> {status}")
+                    
+                except LLMApiError as e:
+                    logger.warning(f"SARIF Issue {idx} SKIPPED - LLM error: {e}")
+                except Exception as e:
+                    logger.error(f"SARIF Analysis Failed for Issue {idx}: {str(e)}")
+        
+        logger.info("SARIF analysis completed")
+
+    def _build_sarif_prompt(self, issue: Dict[str, str], flow_prompt: str) -> str:
+        """
+        Build a prompt for SARIF analysis including data flow information.
+        
+        Args:
+            issue: Issue dictionary.
+            flow_prompt: Data flow prompt section.
+            
+        Returns:
+            Formatted prompt string.
+        """
+        template = """
+You are an expert security researcher analyzing a CodeQL finding with complete data flow information.
+
+### Issue Information
+- Rule: {rule_name}
+- Severity: {severity}
+- Location: {location}
+
+### CodeQL Message
+{message}
+
+{flow_section}
+
+### Your Task
+Analyze this finding with the complete data flow path provided above.
+
+1. Is this a real security vulnerability?
+2. What are the conditions that make it exploitable?
+3. Are there any mitigating factors?
+
+### Answer Guidelines
+- **1337**: Indicates a real security vulnerability
+- **1007**: Indicates false positive / not exploitable
+- **7331**: Indicates more data is needed
+
+Provide your analysis with a status code.
+        """
+        
+        location = f"{issue.get('file', 'unknown')}:{issue.get('start_line', '0')}"
+        
+        return template.format(
+            rule_name=issue.get('name', 'unknown'),
+            severity=issue.get('type', 'medium'),
+            location=location,
+            message=issue.get('message', ''),
+            flow_section=flow_prompt
+        )
 
 if __name__ == '__main__':
     import argparse

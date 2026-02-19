@@ -21,6 +21,57 @@ from src.utils.logger import get_logger
 from src.utils.exceptions import LLMApiError, LLMConfigError
 from src.utils.cache_manager import CacheManager
 from src.codeql.db_lookup import CodeQLDBLookup
+from src.utils.constants import (
+    STATUS_TRUE_POSITIVE,
+    STATUS_FALSE_POSITIVE,
+    STATUS_NEED_MORE_DATA,
+    STATUS_LIKELY_SAFE,
+    RECOGNIZED_STATUS_CODES,
+)
+
+# ================================================================================
+# Phase 2: Reflection Mechanism
+# ================================================================================
+try:
+    from src.agent.reflection import ReflectionAgent, ReflectionConfig
+    REFLECTION_AVAILABLE = True
+except ImportError:
+    REFLECTION_AVAILABLE = False
+    # Fallback: define dummy classes
+    class ReflectionAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+        def should_reflect(self, *args, **kwargs):
+            return False
+        def generate_reflection_prompt(self, *args, **kwargs):
+            return ""
+        def can_continue(self):
+            return False
+    class ReflectionConfig:
+        pass
+
+# ================================================================================
+# Phase 3: RAG Context Enhancement
+# ================================================================================
+try:
+    from src.agent.rag_context import RAGContextEnhancer, RAGContextBuilder, RAGConfig
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
+    # Fallback: define dummy classes
+    class RAGContextEnhancer:
+        def __init__(self, *args, **kwargs):
+            pass
+        def enhance_context(self, *args, **kwargs):
+            return args[1] if len(args) > 1 else ""
+    class RAGContextBuilder:
+        def __init__(self, *args, **kwargs):
+            pass
+        def build_enhanced_prompt(self, *args, **kwargs):
+            return args[0] if len(args) > 0 else ""
+    class RAGConfig:
+        def __init__(self, **kwargs):
+            self.enabled = False
 
 logger = get_logger(__name__)
 
@@ -61,6 +112,27 @@ class LLMAnalyzer:
             cache_dir=cache_dir or "output/cache",
             enabled=cache_enabled
         )
+
+        # ========================================================================
+        # Phase 2: Reflection Mechanism
+        # ========================================================================
+        self.reflection_agent: Optional[ReflectionAgent] = None
+        if REFLECTION_AVAILABLE:
+            # Initialize with default config - can be overridden later
+            self.reflection_config = ReflectionConfig(
+                enabled=True,
+                max_iterations=3,
+                confidence_threshold=0.7
+            )
+        else:
+            self.reflection_config = None
+
+        # ========================================================================
+        # Phase 3: RAG Context Enhancement
+        # ========================================================================
+        self.rag_enhancer: Optional[RAGContextEnhancer] = None
+        self.rag_config: Optional[RAGConfig] = None
+        self._db_path_for_rag: Optional[str] = None
 
         # Tools configuration: A set of function calls the LLM can invoke
         self.tools: List[Dict[str, Any]] = [
@@ -157,6 +229,90 @@ class LLMAnalyzer:
                         "required": ["macro_name"]
                     }
                 }
+            },
+            # ====================================================================
+            # Phase 1: Enhanced Agent Tools
+            # ====================================================================
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_code_pattern",
+                    "description": "Search for code patterns using regex in the entire codebase. Useful for finding similar patterns, common vulnerabilities, or specific constructs.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "Regular expression pattern to search for (e.g., 'memcpy\\s*\\(', 'SELECT.*FROM')."
+                            },
+                            "file_filter": {
+                                "type": "string",
+                                "description": "Optional file filter pattern (e.g., '*.c', '*.java', 'src/*.js')."
+                            }
+                        },
+                        "required": ["pattern"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_callee_functions",
+                    "description": "Retrieves the list of functions that are called by the current function. Useful for understanding function behavior and potential security implications.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyze_data_flow",
+                    "description": "Analyzes how a variable flows through the code - where it's defined, assigned, and used. Essential for understanding security boundaries.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "variable_name": {
+                                "type": "string",
+                                "description": "The name of the variable to trace its data flow."
+                            }
+                        },
+                        "required": ["variable_name"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_file_dependencies",
+                    "description": "Retrieves the list of files/modules that the current file depends on (includes, imports, requires). Useful for understanding code context.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "find_similar_vuln",
+                    "description": "Searches for similar vulnerability patterns in the codebase based on the current issue. Useful for variant analysis.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "vuln_type": {
+                                "type": "string",
+                                "description": "Type of vulnerability to search for (e.g., 'buffer_overflow', 'sql_injection', 'command_injection')."
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Additional context or keywords to refine the search."
+                            }
+                        },
+                        "required": ["vuln_type"]
+                    }
+                }
             }
         ]
 
@@ -222,6 +378,7 @@ class LLMAnalyzer:
                 self.model = get_model_name(provider, model)
                 logger.info(f"Using model: {self.model}")
                 self.setup_litellm_env()
+                self._init_reflection_agent(config)
                 return
 
             # Load from .env file
@@ -311,6 +468,91 @@ class LLMAnalyzer:
                 env_var_name = f"{provider.upper()}_API_KEY"
                 os.environ[env_var_name] = api_key
 
+    def _init_reflection_agent(self, config: Dict[str, Any]) -> None:
+        """
+        Initialize the reflection agent based on configuration.
+
+        Args:
+            config: LLM configuration dictionary.
+        """
+        if not REFLECTION_AVAILABLE:
+            logger.debug("Reflection module not available, skipping initialization")
+            return
+
+        # Check if reflection is explicitly disabled
+        reflection_enabled = config.get("reflection_enabled", True)
+        if not reflection_enabled:
+            logger.info("Reflection mechanism is disabled")
+            self.reflection_agent = None
+            return
+
+        # Get reflection configuration
+        max_iterations = config.get("reflection_max_iterations", 3)
+        confidence_threshold = config.get("reflection_confidence_threshold", 0.7)
+
+        # Create reflection config
+        reflection_config = ReflectionConfig(
+            enabled=reflection_enabled,
+            max_iterations=max_iterations,
+            confidence_threshold=confidence_threshold
+        )
+
+        # Create reflection agent
+        self.reflection_agent = ReflectionAgent(reflection_config)
+        logger.info(
+            f"Reflection mechanism enabled: max_iterations={max_iterations}, "
+            f"confidence_threshold={confidence_threshold}"
+        )
+
+    def _init_rag_agent(self, config: Dict[str, Any], db_path: Optional[str] = None) -> None:
+        """
+        Initialize the RAG context enhancer based on configuration.
+
+        Args:
+            config: LLM configuration dictionary.
+            db_path: Optional database path for RAG context.
+        """
+        if not RAG_AVAILABLE:
+            logger.debug("RAG module not available, skipping initialization")
+            return
+
+        # Check if RAG is explicitly disabled
+        rag_enabled = config.get("rag_enabled", True)
+        if not rag_enabled:
+            logger.info("RAG context enhancement is disabled")
+            self.rag_enhancer = None
+            return
+
+        # Store db_path for later use
+        if db_path:
+            self._db_path_for_rag = db_path
+
+        # Get RAG configuration
+        search_depth = config.get("rag_search_depth", 5)
+        max_context_tokens = config.get("rag_max_context_tokens", 8000)
+        max_results = config.get("rag_max_results_per_keyword", 3)
+
+        # Create RAG config
+        self.rag_config = RAGConfig(
+            enabled=True,
+            search_depth=search_depth,
+            max_context_tokens=max_context_tokens,
+            max_results_per_keyword=max_results
+        )
+
+        # Create RAG enhancer if we have a db_path
+        if self._db_path_for_rag:
+            self.rag_enhancer = RAGContextEnhancer(
+                self._db_path_for_rag,
+                self.rag_config
+            )
+            logger.info(
+                f"RAG context enhancement enabled: search_depth={search_depth}, "
+                f"max_context_tokens={max_context_tokens}"
+            )
+        else:
+            logger.debug("No database path provided for RAG, skipping initialization")
+
     def map_func_args_by_llm(
         self,
         caller: str,
@@ -372,7 +614,8 @@ class LLMAnalyzer:
         db_path: str,
         temperature: float = 0.2,
         top_p: float = 0.2,
-        use_cache: bool = True
+        use_cache: bool = True,
+        issue: Optional[Dict[str, str]] = None
     ) -> Tuple[List[Dict[str, Any]], str]:
         """
         Main loop to keep querying the LLM with MESSAGES context plus
@@ -388,6 +631,7 @@ class LLMAnalyzer:
             temperature (float, optional): Sampling temperature. Defaults to 0.2.
             top_p (float, optional): Nucleus sampling. Defaults to 0.2.
             use_cache (bool, optional): Whether to use cache. Defaults to True.
+            issue (Dict, optional): Issue dictionary for RAG context enhancement.
 
         Returns:
             Tuple[List[Dict[str, Any]], str]:
@@ -406,14 +650,88 @@ class LLMAnalyzer:
         db_path_clean = db_path.replace(" ", "")
         all_functions = functions
 
-        messages: List[Dict[str, Any]] = self.MESSAGES[:]
-        messages.append({"role": "user", "content": prompt})
+        # ========================================================================
+        # Phase 3: RAG Context Enhancement
+        # ========================================================================
+        # Initialize RAG enhancer with db_path if not already done
+        if RAG_AVAILABLE and self.rag_enhancer is None and self.rag_config and self.rag_config.enabled:
+            self._init_rag_agent(self.config, db_path)
 
-        # 仅打印prompt长度，避免打印具体内容
+        # Extract code from prompt for RAG enhancement
+        # The prompt format is: ...\n\n=== CODE ===\n{code}\n... (we'll look for it)
+        enhanced_prompt = prompt
+        if self.rag_enhancer and issue:
+            # Try to extract code from prompt
+            code_match = re.search(r'=== CODE ===\n(.*?)(?:\n===|$)', prompt, re.DOTALL)
+            if code_match:
+                original_code = code_match.group(1).strip()
+                logger.debug(f"Applying RAG enhancement to code context ({len(original_code)} chars)")
+                
+                # Enhance the code context
+                enhanced_code = self.rag_enhancer.enhance_context(
+                    issue=issue,
+                    current_code=original_code,
+                    current_function=current_function
+                )
+                
+                # Replace original code with enhanced code in prompt
+                if enhanced_code != original_code:
+                    enhanced_prompt = prompt.replace(
+                        f'=== CODE ===\n{original_code}',
+                        f'=== CODE ===\n{enhanced_code}',
+                        1
+                    )
+                    logger.debug(f"RAG enhanced context: {len(original_code)} -> {len(enhanced_code)} chars")
+
+        messages: List[Dict[str, Any]] = self.MESSAGES[:]
+        messages.append({"role": "user", "content": enhanced_prompt})
+
+        # Calculate total tokens more accurately
+        # Include system messages, user prompt, and tools
         total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
-        estimated_tokens = total_chars // 4
-        if estimated_tokens > 120000:
-            logger.error(f"Context window may be too large: ~{estimated_tokens} estimated tokens")
+        
+        # Estimate tokens more accurately:
+        # - Basic text: ~4 chars per token
+        # - Tools JSON: ~3 chars per token (more compact)
+        tools_chars = len(json.dumps(self.tools))
+        estimated_tokens = (total_chars // 4) + (tools_chars // 3)
+        
+        # Get max tokens from model context
+        max_context_tokens = 131072  # Default to DeepSeek limit
+        if self.model:
+            # Check for known model context limits
+            if "gpt-4" in self.model.lower():
+                max_context_tokens = 128000
+            elif "gpt-3.5" in self.model.lower():
+                max_context_tokens = 16000
+            elif "claude" in self.model.lower():
+                max_context_tokens = 200000
+            elif "deepseek" in self.model.lower():
+                max_context_tokens = 131072
+        
+        # Reserve more tokens for tools and completion (leave ~30% buffer)
+        available_tokens = int(max_context_tokens * 0.7)
+        
+        if estimated_tokens > available_tokens:
+            logger.error(f"Prompt too large: ~{estimated_tokens} tokens (max: {available_tokens}). Truncating...")
+            # Truncate the prompt to fit - be more aggressive
+            # Calculate how many chars we can keep
+            chars_available = available_tokens * 4
+            chars_to_keep = chars_available - (total_chars - len(enhanced_prompt)) - 1000  # -1000 buffer
+            
+            if chars_to_keep > 100:  # At least keep some content
+                enhanced_prompt = enhanced_prompt[:chars_to_keep] + "\n... [truncated due to context limit]"
+                messages[-1] = {"role": "user", "content": enhanced_prompt}
+                # Recalculate
+                total_chars = sum(len(str(msg.get('content', ''))) for msg in messages)
+                estimated_tokens = (total_chars // 4) + (tools_chars // 3)
+                logger.warning(f"Prompt truncated. New size: ~{estimated_tokens} tokens")
+            else:
+                logger.error(f"Prompt too large even after aggressive truncation. Skipping this issue.")
+                raise LLMApiError(f"Prompt too large: ~{estimated_tokens} tokens (max: {available_tokens}). Cannot analyze this issue.")
+        
+        if estimated_tokens > 100000:
+            logger.warning(f"Context window large: ~{estimated_tokens} estimated tokens")
         else:
             logger.debug(f"Prompt length: {estimated_tokens} tokens (~{total_chars} chars)")
 
@@ -453,6 +771,11 @@ class LLMAnalyzer:
                 raise LLMApiError(f"LLM API error: {e}") from e
             except Exception as e:
                 # Catch any other unexpected errors from LiteLLM
+                error_msg = str(e)
+                # Check if it's a context window error wrapped in a different exception type
+                if "ContextWindowExceededError" in error_msg or "context length" in error_msg.lower() or "maximum context" in error_msg.lower():
+                    logger.error(f"Context window exceeded! Total chars: {total_chars}. Consider reducing prompt size.")
+                    raise LLMApiError(f"Context window exceeded: {e}") from e
                 raise LLMApiError(f"Unexpected error during LLM API call: {e}") from e
 
             content_obj = response.choices[0].message
@@ -473,8 +796,31 @@ class LLMAnalyzer:
 
             if not tool_calls:
                 # Check if we have a recognized status code
-                if final_content and any(code in final_content for code in ["1337", "1007", "7331", "3713"]):
-                    got_answer = True
+                if final_content and any(code in final_content for code in RECOGNIZED_STATUS_CODES):
+                    # ========================================================================
+                    # Phase 2: Reflection Mechanism - Check if we should reflect
+                    # ========================================================================
+                    if self.reflection_agent and self.reflection_agent.should_reflect(final_content):
+                        # Check if we can continue reflecting
+                        if self.reflection_agent.can_continue():
+                            logger.info(f"Reflection triggered: confidence too low, generating reflection prompt")
+                            reflection_prompt = self.reflection_agent.generate_reflection_prompt(
+                                final_content,
+                                {"name": "security_analysis", "file": "unknown", "start_line": "unknown"}
+                            )
+                            # Add reflection prompt as system message
+                            messages.append({
+                                "role": "user",
+                                "content": reflection_prompt
+                            })
+                            # Don't set got_answer=True yet, continue the loop
+                            continue
+                        else:
+                            # Maximum iterations reached, accept the answer
+                            logger.warning("Maximum reflection iterations reached, accepting current answer")
+                            got_answer = True
+                    else:
+                        got_answer = True
                 else:
                     messages.append({
                         "role": "system",
@@ -505,11 +851,11 @@ class LLMAnalyzer:
                         )
                         if isinstance(child_function, dict):
                             all_functions.append(child_function)
-                            child_code = self.extract_function_from_file(db_path_clean, child_function, max_chars=20000)
+                            child_code = self.extract_function_from_file(db_path_clean, child_function, max_chars=3000)
                             response_msg = child_code
 
                         if isinstance(child_function, dict) and isinstance(parent_function, dict):
-                            caller_code = self.extract_function_from_file(db_path_clean, parent_function, max_chars=20000)
+                            caller_code = self.extract_function_from_file(db_path_clean, parent_function, max_chars=3000)
                             args_content = self.map_func_args_by_llm(caller_code, child_code)
                             arg_messages.append({
                                 "role": args_content.role,
@@ -522,14 +868,14 @@ class LLMAnalyzer:
 
                         if isinstance(caller_function, dict):
                             all_functions.append(caller_function)
-                            caller_code = self.extract_function_from_file(db_path_clean, caller_function, max_chars=20000)
+                            caller_code = self.extract_function_from_file(db_path_clean, caller_function, max_chars=3000)
                             response_msg = (
                                 f"Here is the caller function for '{current_function['function_name']}':\n"
                                 + caller_code
                             )
                             args_content = self.map_func_args_by_llm(
                                 caller_code,
-                                self.extract_function_from_file(db_path_clean, current_function, max_chars=20000)
+                                self.extract_function_from_file(db_path_clean, current_function, max_chars=3000)
                             )
                             arg_messages.append({
                                 "role": args_content.role,
@@ -547,7 +893,7 @@ class LLMAnalyzer:
                     elif tool_function_name == 'get_global_var' and "global_var_name" in tool_args:
                         global_var = self.db_lookup.get_global_var(db_path_clean, tool_args["global_var_name"])
                         if isinstance(global_var, dict):
-                            global_var_code = self.extract_function_from_file(db_path_clean, global_var, max_chars=20000)
+                            global_var_code = self.extract_function_from_file(db_path_clean, global_var, max_chars=3000)
                             response_msg = global_var_code
                         else:
                             response_msg = global_var
@@ -555,10 +901,119 @@ class LLMAnalyzer:
                     elif tool_function_name == 'get_class' and "object_name" in tool_args:
                         curr_class = self.db_lookup.get_class(db_path_clean, tool_args["object_name"])
                         if isinstance(curr_class, dict):
-                            class_code = self.extract_function_from_file(db_path_clean, curr_class, max_chars=20000)
+                            class_code = self.extract_function_from_file(db_path_clean, curr_class, max_chars=3000)
                             response_msg = class_code
                         else:
                             response_msg = curr_class
+
+                    # ====================================================================
+                    # Phase 1: Enhanced Agent Tools - Tool Call Handlers
+                    # ====================================================================
+                    elif tool_function_name == 'search_code_pattern' and "pattern" in tool_args:
+                        search_results = self.db_lookup.search_code_pattern(
+                            db_path_clean,
+                            tool_args["pattern"],
+                            tool_args.get("file_filter"),
+                            max_results=10
+                        )
+                        if isinstance(search_results, list):
+                            # Format results for display
+                            formatted = f"Found {len(search_results)} matches:\n\n"
+                            for i, result in enumerate(search_results[:5], 1):
+                                formatted += f"--- Match {i} ---\n"
+                                formatted += f"File: {result['file']}\n"
+                                formatted += f"Line: {result['line']}\n"
+                                formatted += f"Code: {result['match']}\n"
+                                formatted += f"Context:\n{result['context']}\n\n"
+                            response_msg = formatted
+                        else:
+                            response_msg = search_results
+
+                    elif tool_function_name == 'get_callee_functions':
+                        callees = self.db_lookup.get_callee_functions(
+                            function_tree_file,
+                            current_function
+                        )
+                        if isinstance(callees, list):
+                            formatted = f"Found {len(callees)} callee functions:\n\n"
+                            for i, callee in enumerate(callees[:10], 1):
+                                formatted += f"{i}. {callee.get('function_name', 'unknown')}\n"
+                                formatted += f"   File: {callee.get('file', 'unknown')}\n"
+                                formatted += f"   Lines: {callee.get('start_line', '?')}-{callee.get('end_line', '?')}\n\n"
+                            response_msg = formatted
+                        else:
+                            response_msg = callees
+
+                    elif tool_function_name == 'analyze_data_flow' and "variable_name" in tool_args:
+                        flow_analysis = self.db_lookup.analyze_data_flow(
+                            db_path_clean,
+                            function_tree_file,
+                            tool_args["variable_name"],
+                            current_function,
+                            max_depth=3
+                        )
+                        if isinstance(flow_analysis, dict):
+                            formatted = f"Data flow analysis for '{flow_analysis['variable']}':\n\n"
+                            formatted += f"Function: {flow_analysis['function']}\n\n"
+
+                            if flow_analysis.get('definitions'):
+                                formatted += "Definitions (where the variable is set):\n"
+                                for d in flow_analysis['definitions'][:5]:
+                                    formatted += f"  Line {d['line']}: {d['code']}\n"
+                                formatted += "\n"
+
+                            if flow_analysis.get('usages'):
+                                formatted += "Usages (where the variable is used):\n"
+                                for u in flow_analysis['usages'][:10]:
+                                    formatted += f"  Line {u['line']}: {u['code']}\n"
+                                formatted += "\n"
+
+                            formatted += f"Note: {flow_analysis.get('note', '')}"
+                            response_msg = formatted
+                        else:
+                            response_msg = flow_analysis
+
+                    elif tool_function_name == 'get_file_dependencies':
+                        # Get the file from current function
+                        current_file = current_function.get('file', current_function.get('file_path', ''))
+                        deps = self.db_lookup.get_file_dependencies(db_path_clean, current_file)
+                        if isinstance(deps, list):
+                            formatted = f"Found {len(deps)} dependencies:\n\n"
+                            for dep in deps[:20]:
+                                formatted += f"  [{dep['type']}] {dep['target']}\n"
+                            response_msg = formatted
+                        else:
+                            response_msg = deps
+
+                    elif tool_function_name == 'find_similar_vuln' and "vuln_type" in tool_args:
+                        # Map vulnerability types to search patterns
+                        vuln_patterns = {
+                            'buffer_overflow': r'(memcpy|strcpy|strcat|sprintf|gets)\s*\(',
+                            'sql_injection': r'(executeQuery|execute|Statement)\s*\(',
+                            'command_injection': r'(exec|system|popen|Runtime\.getRuntime)\s*\(',
+                            'path_traversal': r'(FileInputStream|open|readFile)\s*\(',
+                            'xss': r'(innerHTML|document\.write|eval)\s*\(',
+                            'deserialization': r'(ObjectInputStream|readObject|unserialize)\s*\('
+                        }
+                        pattern = vuln_patterns.get(
+                            tool_args['vuln_type'],
+                            tool_args.get('context', '.*')
+                        )
+                        search_results = self.db_lookup.search_code_pattern(
+                            db_path_clean,
+                            pattern,
+                            max_results=10
+                        )
+                        if isinstance(search_results, list):
+                            formatted = f"Found {len(search_results)} potential {tool_args['vuln_type']} patterns:\n\n"
+                            for i, result in enumerate(search_results[:5], 1):
+                                formatted += f"--- Instance {i} ---\n"
+                                formatted += f"File: {result['file']}\n"
+                                formatted += f"Line: {result['line']}\n"
+                                formatted += f"Code: {result['match']}\n\n"
+                            response_msg = formatted
+                        else:
+                            response_msg = search_results
 
                     else:
                         response_msg = (
@@ -594,7 +1049,7 @@ class LLMAnalyzer:
         self,
         db_path: str,
         current_function: Union[str, Dict[str, str]],
-        max_chars: int = 20000
+        max_chars: int = 3000
     ) -> str:
         """
         Return a snippet of code for the given current_function from the archived src.zip.

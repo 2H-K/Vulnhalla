@@ -28,6 +28,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.llm.strategies.base import BaseStrategy
+from src.utils.constants import (
+    STATUS_TRUE_POSITIVE,
+    STATUS_FALSE_POSITIVE,
+    ISSUE_CLASSIFICATION_TRUE,
+    ISSUE_CLASSIFICATION_FALSE,
+)
 from src.utils.common_functions import read_file as read_file_utf8
 from src.utils.logger import get_logger
 
@@ -269,10 +275,10 @@ Your response should start with one of these three codes followed by your explan
         """
         content_lower = llm_content.lower()
         
-        if "1337" in content_lower:
-            return "true"
-        elif "1007" in content_lower:
-            return "false"
+        if STATUS_TRUE_POSITIVE in content_lower:
+            return ISSUE_CLASSIFICATION_TRUE
+        elif STATUS_FALSE_POSITIVE in content_lower:
+            return ISSUE_CLASSIFICATION_FALSE
         else:
             return "more"
     
